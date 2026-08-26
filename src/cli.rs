@@ -26,6 +26,10 @@ pub struct Cli {
     /// Verify existing chapters and redownload if updated
     #[arg(long)]
     pub verify: bool,
+
+    /// Number of concurrent chapter downloads (default: 1)
+    #[arg(short = 't', long, default_value = "1")]
+    pub threads: usize,
 }
 
 pub fn choose_manga(results: &[Manga]) -> Result<Manga> {

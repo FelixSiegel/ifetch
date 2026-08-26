@@ -277,15 +277,17 @@ pub fn download_chapter(
     output_dir: &Path,
     width: usize,
     verify: bool,
+    pb: &indicatif::ProgressBar,
 ) -> Result<Option<std::path::PathBuf>> {
     let filename = chapter_filename(&manga.title, &chapter.number.to_string(), width);
     let dest = output_dir.join(&filename);
 
     if !verify && dest.exists() {
-        println!("Skip Chapter {}: {}", chapter.number, dest.display());
+        pb.finish_with_message(format!("Skipped Chapter {}", chapter.number));
         return Ok(None);
     }
 
+    pb.set_message(format!("Chapter {}...", chapter.number));
     let urls = chapter_images(client, &chapter.url)?;
 
     if dest.exists() {
@@ -298,13 +300,19 @@ pub fn download_chapter(
         .unwrap_or(true);
 
         if !is_updated {
-            println!("Skip Chapter {}: {}", chapter.number, dest.display());
+            pb.finish_with_message(format!("Skipped Chapter {}", chapter.number));
             return Ok(None);
         }
-        println!("Updating Chapter {}: {} pages", chapter.number, urls.len());
+        pb.set_message(format!(
+            "Updating Ch {} ({} pages)",
+            chapter.number,
+            urls.len()
+        ));
     } else {
-        println!("Chapter {}: {} pages", chapter.number, urls.len());
+        pb.set_message(format!("Chapter {} ({} pages)", chapter.number, urls.len()));
     }
+
+    pb.set_length(urls.len() as u64);
 
     let mut temp = dest.clone();
     temp.set_extension("cbz.part");
@@ -339,7 +347,6 @@ pub fn download_chapter(
         archive.write_all(comic_info.as_bytes())?;
 
         for (i, img_url) in urls.iter().enumerate() {
-            let index = i + 1;
             let mut res = client
                 .get(img_url)
                 .header("Referer", &chapter.url)
@@ -356,12 +363,10 @@ pub fn download_chapter(
                 .unwrap_or("");
             let ext = image_extension(ct, &data, img_url);
 
-            archive.start_file(format!("{:03}{}", index, ext), options.clone())?;
+            archive.start_file(format!("{:03}{}", i + 1, ext), options.clone())?;
             archive.write_all(&data)?;
 
-            print!("\r  Page {}/{}", index, urls.len());
-
-            std::io::stdout().flush().unwrap();
+            pb.inc(1);
         }
         archive.finish()?;
         Ok(())
@@ -370,14 +375,12 @@ pub fn download_chapter(
     match result {
         Ok(_) => {
             std::fs::rename(&temp, &dest)?;
-            println!(
-                "\r  Saved {:<20}",
-                dest.file_name().unwrap().to_string_lossy()
-            );
+            pb.finish_with_message(format!("Saved Chapter {}", chapter.number));
             Ok(Some(dest))
         }
         Err(e) => {
             let _ = std::fs::remove_file(&temp);
+            pb.finish_with_message(format!("Error Chapter {}", chapter.number));
             Err(e)
         }
     }

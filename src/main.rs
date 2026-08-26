@@ -86,25 +86,55 @@ fn run() -> anyhow::Result<()> {
         .unwrap_or(3)
         .max(3);
 
-    let mut saved = 0;
+    use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+    use rayon::prelude::*;
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()
+        .unwrap_or(());
+
+    let m = MultiProgress::new();
+    let style = ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len}")
+        .unwrap()
+        .progress_chars("=>-");
+
+    let current_index = std::sync::atomic::AtomicUsize::new(0);
     let chosen_len = chosen.len();
-    for (i, chapter) in chosen.iter().enumerate() {
-        if core::download_chapter(
-            &client,
-            &manga,
-            chapter,
-            &manga_output_dir,
-            max_width,
-            args.verify,
-        )?
-        .is_some()
-        {
-            saved += 1;
-            if i + 1 < chosen_len {
-                std::thread::sleep(Duration::from_millis(500));
+
+    let saved: usize = (0..args.threads)
+        .into_par_iter()
+        .map(|_| {
+            let mut local_saved = 0;
+            loop {
+                let i = current_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= chosen_len {
+                    break;
+                }
+                let chapter = &chosen[i];
+
+                let pb = m.add(ProgressBar::new(0));
+                pb.set_style(style.clone());
+
+                let res = core::download_chapter(
+                    &client,
+                    &manga,
+                    chapter,
+                    &manga_output_dir,
+                    max_width,
+                    args.verify,
+                    &pb,
+                );
+
+                // short sleep after each downloaded chapter
+                if let Ok(Some(_)) = res {
+                    std::thread::sleep(Duration::from_millis(500));
+                    local_saved += 1;
+                }
             }
-        }
-    }
+            local_saved
+        })
+        .sum();
 
     let path = manga_output_dir.canonicalize().unwrap_or(manga_output_dir);
     println!("\nDone: {} new CBZ file(s) in {}", saved, path.display());
