@@ -86,34 +86,28 @@ pub fn image_extension(content_type: &str, data: &[u8], url_path: &str) -> &'sta
         _ => {}
     }
 
-    if data.starts_with(b"\xff\xd8\xff") {
-        return ".jpg";
-    }
-    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return ".png";
-    }
-    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
-        return ".gif";
-    }
-    if data.starts_with(b"RIFF") {
-        return ".webp";
-    }
-    if data.len() >= 12 && (&data[4..12] == b"ftypavif" || &data[4..12] == b"ftypavis") {
-        return ".avif";
+    match data {
+        d if d.starts_with(b"\xff\xd8\xff") => return ".jpg",
+        d if d.starts_with(b"\x89PNG\r\n\x1a\n") => return ".png",
+        d if d.starts_with(b"GIF87a") || d.starts_with(b"GIF89a") => return ".gif",
+        d if d.starts_with(b"RIFF") => return ".webp",
+        d if d.len() >= 12 && (&d[4..12] == b"ftypavif" || &d[4..12] == b"ftypavis") => {
+            return ".avif";
+        }
+        _ => {}
     }
 
-    if url_path.ends_with(".jpg") || url_path.ends_with(".jpeg") {
-        return ".jpg";
+    match url_path {
+        p if p.ends_with(".jpg") || p.ends_with(".jpeg") => ".jpg",
+        p if p.ends_with(".png") => ".png",
+        p if p.ends_with(".webp") => ".webp",
+        p if p.ends_with(".gif") => ".gif",
+        _ => ".jpg", // Default fallback
     }
-    if url_path.ends_with(".png") {
-        return ".png";
-    }
-    if url_path.ends_with(".webp") {
-        return ".webp";
-    }
-    if url_path.ends_with(".gif") {
-        return ".gif";
-    }
+}
 
-    ".jpg" // Default fallback
+pub fn escape_xml(text: &str) -> String {
+    text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
 }

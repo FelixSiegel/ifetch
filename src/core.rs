@@ -47,6 +47,10 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
         return Ok(vec![Manga {
             title,
             url: url.to_string(),
+            description: String::new(),
+            genres: vec![],
+            authors: vec![],
+            alt_names: vec![],
         }]);
     }
 
@@ -70,6 +74,10 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
                 results.push(Manga {
                     title,
                     url: joined.to_string(),
+                    description: String::new(),
+                    genres: vec![],
+                    authors: vec![],
+                    alt_names: vec![],
                 });
             }
         }
@@ -77,7 +85,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     Ok(results)
 }
 
-pub fn manga_chapters(client: &Client, url: &str) -> Result<(String, Vec<Chapter>)> {
+pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>)> {
     let res = client.get(url).send()?.error_for_status()?;
     let text = res.text()?;
     let doc = Html::parse_document(&text);
@@ -96,6 +104,47 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(String, Vec<Chapter
                 .unwrap_or("manga")
                 .to_string()
         });
+
+    let desc_sel = Selector::parse(".summary p").unwrap();
+    let description = doc
+        .select(&desc_sel)
+        .next()
+        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .unwrap_or_else(String::new);
+
+    let genres_sel = Selector::parse(".genres a").unwrap();
+    let genres: Vec<String> = doc
+        .select(&genres_sel)
+        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let authors_sel = Selector::parse(".authors a.author").unwrap();
+    let authors: Vec<String> = doc
+        .select(&authors_sel)
+        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let alt_sel = Selector::parse(".alt_name").unwrap();
+    let alt_names: Vec<String> = doc
+        .select(&alt_sel)
+        .next()
+        .map(|e| e.text().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(String::new)
+        .split(';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let manga = Manga {
+        title,
+        url: url.to_string(),
+        description,
+        genres,
+        authors,
+        alt_names,
+    };
 
     let mut chapters = Vec::new();
     let anchor_sel = Selector::parse("a[href]").unwrap();
@@ -140,7 +189,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(String, Vec<Chapter
     if chapters.is_empty() {
         bail!("No chapters found on manga page");
     }
-    Ok((title, chapters))
+    Ok((manga, chapters))
 }
 
 pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>> {
@@ -223,12 +272,12 @@ use zip::write::SimpleFileOptions;
 
 pub fn download_chapter(
     client: &Client,
-    title: &str,
+    manga: &Manga,
     chapter: &Chapter,
     output_dir: &Path,
     width: usize,
 ) -> Result<Option<std::path::PathBuf>> {
-    let filename = chapter_filename(title, &chapter.number.to_string(), width);
+    let filename = chapter_filename(&manga.title, &chapter.number.to_string(), width);
     let dest = output_dir.join(&filename);
 
     let urls = chapter_images(client, &chapter.url)?;
@@ -237,7 +286,8 @@ pub fn download_chapter(
         let is_updated = (|| -> Result<bool> {
             let file = std::fs::File::open(&dest)?;
             let archive = zip::ZipArchive::new(file)?;
-            Ok(archive.len() != urls.len())
+            // ComicInfo.xml is 1 extra file
+            Ok(archive.len() != urls.len() + 1)
         })()
         .unwrap_or(true);
 
@@ -258,6 +308,29 @@ pub fn download_chapter(
         let mut archive = zip::ZipWriter::new(file);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        use crate::utils::escape_xml;
+        let comic_info = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Title>{}</Title>
+  <Series>{}</Series>
+  <Number>{}</Number>
+  <Summary>{}</Summary>
+  <Genre>{}</Genre>
+  <Writer>{}</Writer>
+  <AlternateSeries>{}</AlternateSeries>
+</ComicInfo>"#,
+            escape_xml(&chapter.label),
+            escape_xml(&manga.title),
+            chapter.number,
+            escape_xml(&manga.description),
+            escape_xml(&manga.genres.join(", ")),
+            escape_xml(&manga.authors.join(", ")),
+            escape_xml(&manga.alt_names.join(", ")),
+        );
+        archive.start_file("ComicInfo.xml", options.clone())?;
+        archive.write_all(comic_info.as_bytes())?;
 
         for (i, img_url) in urls.iter().enumerate() {
             let index = i + 1;

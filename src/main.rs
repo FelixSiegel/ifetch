@@ -26,7 +26,7 @@ fn run() -> anyhow::Result<()> {
     let client = core::build_client()?;
 
     let direct_url = utils::series_url(&query)?;
-    let (title, chapters) = if let Some(url) = direct_url {
+    let (manga, chapters) = if let Some(url) = direct_url {
         core::manga_chapters(&client, &url)?
     } else {
         let results = core::search_manga(&client, &query)?;
@@ -34,10 +34,19 @@ fn run() -> anyhow::Result<()> {
         core::manga_chapters(&client, &selected.url)?
     };
 
+    use console::style;
+
+    let mut genres_str = manga.genres.join(", ");
+    if genres_str.chars().count() > 80 {
+        genres_str = genres_str.chars().take(77).collect::<String>() + "...";
+    }
+
     println!(
-        "\n{}: {} chapters ({} - {})",
-        title,
-        chapters.len(),
+        "\n{}\n{}\n{}\n\n{} chapters ({} - {})",
+        style(manga.title.clone()).cyan().bold(),
+        style(genres_str).yellow(),
+        style(manga.description.clone()).dim(),
+        style(chapters.len()).green(),
         chapters.first().unwrap().number,
         chapters.last().unwrap().number
     );
@@ -57,7 +66,9 @@ fn run() -> anyhow::Result<()> {
     let chosen = core::select_chapters(&chapters, &spec)?;
 
     // Clean title for folder name
-    let folder_name = title.replace(|c: char| r#"<>:"/\|?*"#.contains(c), "");
+    let folder_name = manga
+        .title
+        .replace(|c: char| r#"<>:"/\|?*"#.contains(c), "");
     let folder_name = folder_name.trim();
     let folder_name = if folder_name.is_empty() {
         "manga".to_string()
@@ -78,7 +89,7 @@ fn run() -> anyhow::Result<()> {
     let mut saved = 0;
     let chosen_len = chosen.len();
     for (i, chapter) in chosen.iter().enumerate() {
-        if core::download_chapter(&client, &title, chapter, &manga_output_dir, max_width)?.is_some()
+        if core::download_chapter(&client, &manga, chapter, &manga_output_dir, max_width)?.is_some()
         {
             saved += 1;
         }
