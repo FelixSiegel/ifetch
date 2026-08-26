@@ -89,12 +89,20 @@ fn run() -> anyhow::Result<()> {
     let mut saved = 0;
     let chosen_len = chosen.len();
     for (i, chapter) in chosen.iter().enumerate() {
-        if core::download_chapter(&client, &manga, chapter, &manga_output_dir, max_width)?.is_some()
+        if core::download_chapter(
+            &client,
+            &manga,
+            chapter,
+            &manga_output_dir,
+            max_width,
+            args.verify,
+        )?
+        .is_some()
         {
             saved += 1;
-        }
-        if i + 1 < chosen_len {
-            std::thread::sleep(Duration::from_millis(500));
+            if i + 1 < chosen_len {
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
     }
 

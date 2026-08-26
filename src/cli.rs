@@ -22,6 +22,10 @@ pub struct Cli {
     /// List chapters without downloading
     #[arg(long)]
     pub list: bool,
+
+    /// Verify existing chapters and redownload if updated
+    #[arg(long)]
+    pub verify: bool,
 }
 
 pub fn choose_manga(results: &[Manga]) -> Result<Manga> {

@@ -276,9 +276,15 @@ pub fn download_chapter(
     chapter: &Chapter,
     output_dir: &Path,
     width: usize,
+    verify: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let filename = chapter_filename(&manga.title, &chapter.number.to_string(), width);
     let dest = output_dir.join(&filename);
+
+    if !verify && dest.exists() {
+        println!("Skip Chapter {}: {}", chapter.number, dest.display());
+        return Ok(None);
+    }
 
     let urls = chapter_images(client, &chapter.url)?;
 
