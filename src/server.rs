@@ -1,6 +1,7 @@
 use crate::core;
 use crate::models::{Chapter, Manga};
 use anyhow::Result;
+use log::{error, info, warn};
 use reqwest::blocking::Client;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -9,8 +10,9 @@ use tiny_http::{Header, Response, Server, StatusCode};
 use url::Url;
 
 pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
+    env_logger::init();
     let server = Server::http(format!("0.0.0.0:{}", port)).unwrap();
-    println!("Server running on http://0.0.0.0:{}", port);
+    info!("Server running on http://0.0.0.0:{}", port);
     let client = Arc::new(core::build_client().unwrap());
     let output_dir = Arc::new(output_dir);
 
@@ -25,6 +27,8 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
             let query: std::collections::HashMap<_, _> =
                 parsed_url.query_pairs().into_owned().collect();
 
+            info!("Received {} {}", request.method().as_str(), path);
+
             let response = handle_route(&path, &query, &client_clone, &output_clone, threads);
 
             match response {
@@ -32,6 +36,7 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
                     let _ = request.respond(resp);
                 }
                 Err(e) => {
+                    error!("Error handling request: {}", e);
                     let _ = request.respond(
                         Response::from_string(format!("Error: {}", e)).with_status_code(500),
                     );
@@ -62,7 +67,6 @@ fn handle_route(
     if path == "/api/search" {
         if let Some(q) = query.get("q") {
             let results = core::search_manga(client, q)?;
-            // Only id, title, cover_url mapped by serde json
             let json = serde_json::to_string(&results)?;
             return Ok(Response::from_string(json).with_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
@@ -93,31 +97,49 @@ fn handle_route(
             let folder = get_folder_name(&manga.title);
             let manga_dir = output_dir.join(&folder);
 
-            let mut has_any = false;
-            if manga_dir.exists() {
-                for entry in std::fs::read_dir(&manga_dir)? {
-                    if entry?.path().extension().unwrap_or_default() == "cbz" {
-                        has_any = true;
-                        break;
-                    }
+            let max_width = chapters
+                .iter()
+                .map(|c| c.number.to_string().split('.').next().unwrap().len())
+                .max()
+                .unwrap_or(3)
+                .max(3);
+
+            let mut existing_chapters = Vec::new();
+            for chapter in &chapters {
+                let filename = crate::utils::chapter_filename(
+                    &manga.title,
+                    &chapter.number.to_string(),
+                    max_width,
+                );
+                let cbz_path = manga_dir.join(&filename);
+                if cbz_path.exists() {
+                    existing_chapters.push(chapter.clone());
                 }
             }
 
-            if !has_any {
-                // Trigger download
+            if existing_chapters.len() < chapters.len() {
+                // Background download missing ones
+                info!(
+                    "Missing chapters detected for {}. Triggering background download.",
+                    id
+                );
                 let client_bg = client.clone();
                 let output_bg = output_dir.clone();
                 let id_clone = id.to_string();
                 std::thread::spawn(move || {
                     let _ = download_background(&client_bg, &id_clone, &output_bg, threads);
                 });
-                return Ok(Response::from_string("").with_status_code(202).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap(),
-                ));
+
+                if existing_chapters.is_empty() {
+                    // Nothing downloaded yet, return 202
+                    return Ok(Response::from_string("").with_status_code(202).with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap(),
+                    ));
+                }
             }
 
-            // Return chapter list
-            let json = serde_json::to_string(&chapters)?;
+            // Return chapter list of only existing chapters
+            let json = serde_json::to_string(&existing_chapters)?;
             return Ok(Response::from_string(json).with_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
             ));
@@ -145,6 +167,10 @@ fn handle_route(
                 let cbz_path = output_dir.join(&folder).join(&filename);
 
                 if !cbz_path.exists() {
+                    warn!(
+                        "Requested pages for missing chapter: {}",
+                        cbz_path.display()
+                    );
                     return Ok(Response::from_string("Not downloaded yet").with_status_code(404));
                 }
 
@@ -267,5 +293,6 @@ fn download_background(
         });
     });
 
+    info!("Background download for {} completed.", id);
     Ok(())
 }
