@@ -1,6 +1,7 @@
 mod cli;
 mod core;
 mod models;
+mod server;
 mod utils;
 
 use crate::cli::Cli;
@@ -17,6 +18,11 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     let args = Cli::parse();
+
+    if args.server {
+        server::run_server(args.port, args.output, args.threads);
+        return Ok(());
+    }
 
     let query = match args.manga {
         Some(m) => m,

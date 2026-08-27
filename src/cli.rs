@@ -30,6 +30,14 @@ pub struct Cli {
     /// Number of concurrent chapter downloads (default: 1)
     #[arg(short = 't', long, default_value = "1")]
     pub threads: usize,
+
+    /// Run as an HTTP server
+    #[arg(long)]
+    pub server: bool,
+
+    /// Server port
+    #[arg(long, default_value = "8080")]
+    pub port: u16,
 }
 
 pub fn choose_manga(results: &[Manga]) -> Result<Manga> {
