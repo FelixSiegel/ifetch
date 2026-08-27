@@ -1,12 +1,11 @@
 use crate::core;
-use crate::models::{Chapter, Manga};
 use anyhow::Result;
 use log::{error, info, warn};
 use reqwest::blocking::Client;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tiny_http::{Header, Response, Server, StatusCode};
+use tiny_http::{Header, Response, Server};
 use url::Url;
 
 pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
