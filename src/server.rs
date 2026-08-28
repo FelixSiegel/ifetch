@@ -62,6 +62,34 @@ fn handle_route(
     output_dir: &PathBuf,
     threads: usize,
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
+    if path == "/index.min.json" || path == "/index.min.json/index.min.json" {
+        let json = r#"[{"name":"iFetch API","pkg":"eu.kanade.tachiyomi.extension.en.ifetch","apk":"ifetch-v4.apk","lang":"en","code":1,"version":"1.0","nsfw":0,"hasReadme":0,"hasChangelog":0,"sources":[{"id":"2265008544838634865","name":"iFetch API","lang":"en","baseUrl":"http://192.168.2.18:8080"}]}]"#;
+        return Ok(Response::from_string(json).with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+    }
+    
+    if path.ends_with("repo.json") {
+        let json = r#"{"meta":{"name":"iFetch Repo","shortName":"iFetch","website":"http://192.168.2.18:8080","signingKeyFingerprint":"fd61f54a581cfac9d565e68a5db2e7edd84f0044b33a5a384e34d22f88e32293"}}"#;
+        return Ok(Response::from_string(json).with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+    }
+
+    if path.ends_with("icon.png") || path.contains("/icon/") {
+        let transparent_png = vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        return Ok(Response::from_data(transparent_png).with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap()));
+    }
+
+    if path.ends_with(".apk") {
+        if let Ok(mut file) = std::fs::File::open("ifetch.apk") {
+            let mut buf = Vec::new();
+            use std::io::Read;
+            if file.read_to_end(&mut buf).is_ok() {
+                return Ok(Response::from_data(buf).with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/vnd.android.package-archive"[..]).unwrap()));
+            }
+        }
+        return Ok(Response::from_string("APK not found").with_status_code(404));
+    }
+
     // GET /api/search?q={query}
     if path == "/api/search" {
         if let Some(q) = query.get("q") {
