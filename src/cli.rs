@@ -16,7 +16,7 @@ pub struct Cli {
     pub chapters: Option<String>,
 
     /// Output directory
-    #[arg(short, long, default_value = "downloads")]
+    #[arg(short, long, env = "IFETCH_OUTPUT", default_value = "downloads")]
     pub output: PathBuf,
 
     /// List chapters without downloading
@@ -24,19 +24,19 @@ pub struct Cli {
     pub list: bool,
 
     /// Verify existing chapters and redownload if updated
-    #[arg(long)]
+    #[arg(long, env = "IFETCH_VERIFY")]
     pub verify: bool,
 
     /// Number of concurrent chapter downloads (default: 1)
-    #[arg(short = 't', long, default_value = "1")]
+    #[arg(short = 't', long, env = "IFETCH_THREADS", default_value = "1")]
     pub threads: usize,
 
     /// Run as an HTTP server
-    #[arg(long)]
+    #[arg(long, env = "IFETCH_SERVER")]
     pub server: bool,
 
     /// Server port
-    #[arg(long, default_value = "8080")]
+    #[arg(long, env = "IFETCH_PORT", default_value = "8080")]
     pub port: u16,
 }
 
