@@ -2,9 +2,11 @@ use crate::core;
 use anyhow::Result;
 use log::{error, info, warn};
 use reqwest::blocking::Client;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use tiny_http::{Header, Response, Server};
 use url::Url;
 
@@ -14,10 +16,12 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
     info!("Server running on http://0.0.0.0:{}", port);
     let client = Arc::new(core::build_client().unwrap());
     let output_dir = Arc::new(output_dir);
+    let active_downloads = Arc::new(Mutex::new(HashSet::new()));
 
     for request in server.incoming_requests() {
         let client_clone = Arc::clone(&client);
         let output_clone = Arc::clone(&output_dir);
+        let active_clone = Arc::clone(&active_downloads);
 
         std::thread::spawn(move || {
             let url_str = format!("http://localhost{}", request.url());
@@ -28,7 +32,14 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
 
             info!("Received {} {}", request.method().as_str(), path);
 
-            let response = handle_route(&path, &query, &client_clone, &output_clone, threads);
+            let response = handle_route(
+                &path,
+                &query,
+                &client_clone,
+                &output_clone,
+                threads,
+                &active_clone,
+            );
 
             match response {
                 Ok(resp) => {
@@ -61,6 +72,7 @@ fn handle_route(
     client: &Client,
     output_dir: &Path,
     threads: usize,
+    active_downloads: &Arc<Mutex<HashSet<String>>>,
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     // GET /api/search?q={query}
     if path == "/api/search" {
@@ -118,17 +130,29 @@ fn handle_route(
         }
 
         if existing_chapters.len() < chapters.len() {
-            // Background download missing ones
-            info!(
-                "Missing chapters detected for {}. Triggering background download.",
-                id
-            );
-            let client_bg = client.clone();
-            let output_bg = output_dir.to_path_buf();
             let id_clone = id.to_string();
-            std::thread::spawn(move || {
-                let _ = download_background(&client_bg, &id_clone, &output_bg, threads);
-            });
+            let mut active = active_downloads.lock().unwrap();
+            if active.contains(&id_clone) {
+                info!(
+                    "Download for {} is already in progress. Skipping duplicate thread.",
+                    id
+                );
+            } else {
+                active.insert(id_clone.clone());
+                drop(active);
+                // Background download missing ones
+                info!(
+                    "Missing chapters detected for {}. Triggering background download.",
+                    id
+                );
+                let client_bg = client.clone();
+                let output_bg = output_dir.to_path_buf();
+                let active_bg = active_downloads.clone();
+                std::thread::spawn(move || {
+                    let _ = download_background(&client_bg, &id_clone, &output_bg, threads);
+                    active_bg.lock().unwrap().remove(&id_clone);
+                });
+            }
 
             if existing_chapters.is_empty() {
                 // Nothing downloaded yet, return 202
@@ -240,12 +264,7 @@ fn handle_route(
     Ok(Response::from_string("Not Found").with_status_code(404))
 }
 
-fn download_background(
-    client: &Client,
-    id: &str,
-    output_dir: &Path,
-    threads: usize,
-) -> Result<()> {
+fn download_background(client: &Client, id: &str, output_dir: &Path, threads: usize) -> Result<()> {
     use rayon::prelude::*;
     let url = format!("https://mangakatana.com/manga/{}", id);
     let (manga, chapters) = core::manga_chapters(client, &url)?;
