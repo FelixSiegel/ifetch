@@ -61,7 +61,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
             .unwrap_or("".to_string());
 
         return Ok(vec![Manga {
-            id: path.split('/').last().unwrap_or("").to_string(),
+            id: path.split('/').next_back().unwrap_or("").to_string(),
             title,
             url: url.to_string(),
             cover_url,
@@ -80,46 +80,46 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
     for item in doc.select(&item_sel) {
         let title_sel = Selector::parse(".title a").unwrap();
-        if let Some(anchor) = item.select(&title_sel).next() {
-            if let Some(href) = anchor.value().attr("href") {
-                let joined = base_url_parsed.join(href)?;
-                let p = joined.path().trim_end_matches('/');
-                if manga_re.is_match(p) && !seen.contains(joined.as_str()) {
-                    seen.insert(joined.to_string());
-                    let title = anchor
-                        .text()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .trim()
-                        .to_string();
+        if let Some(anchor) = item.select(&title_sel).next()
+            && let Some(href) = anchor.value().attr("href")
+        {
+            let joined = base_url_parsed.join(href)?;
+            let p = joined.path().trim_end_matches('/');
+            if manga_re.is_match(p) && !seen.contains(joined.as_str()) {
+                seen.insert(joined.to_string());
+                let title = anchor
+                    .text()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim()
+                    .to_string();
 
-                    let img_sel = Selector::parse(".wrap_img img").unwrap();
-                    let cover_url = item
-                        .select(&img_sel)
-                        .next()
-                        .and_then(|img| img.value().attr("data-src").or(img.value().attr("src")))
-                        .unwrap_or("")
-                        .to_string();
+                let img_sel = Selector::parse(".wrap_img img").unwrap();
+                let cover_url = item
+                    .select(&img_sel)
+                    .next()
+                    .and_then(|img| img.value().attr("data-src").or(img.value().attr("src")))
+                    .unwrap_or("")
+                    .to_string();
 
-                    let status_sel = Selector::parse(".status").unwrap();
-                    let status = item
-                        .select(&status_sel)
-                        .next()
-                        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
-                        .unwrap_or("".to_string());
+                let status_sel = Selector::parse(".status").unwrap();
+                let status = item
+                    .select(&status_sel)
+                    .next()
+                    .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+                    .unwrap_or("".to_string());
 
-                    results.push(Manga {
-                        id: p.split('/').last().unwrap_or("").to_string(),
-                        title,
-                        url: joined.to_string(),
-                        cover_url,
-                        status,
-                        description: String::new(),
-                        genres: vec![],
-                        authors: vec![],
-                        alt_names: vec![],
-                    });
-                }
+                results.push(Manga {
+                    id: p.split('/').next_back().unwrap_or("").to_string(),
+                    title,
+                    url: joined.to_string(),
+                    cover_url,
+                    status,
+                    description: String::new(),
+                    genres: vec![],
+                    authors: vec![],
+                    alt_names: vec![],
+                });
             }
         }
     }
@@ -141,7 +141,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
             parsed
                 .path()
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("manga")
                 .to_string()
         });
@@ -151,7 +151,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
         .select(&desc_sel)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
-        .unwrap_or_else(String::new);
+        .unwrap_or_default();
 
     let genres_sel = Selector::parse(".genres a").unwrap();
     let genres: Vec<String> = doc
@@ -172,7 +172,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
         .select(&alt_sel)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" "))
-        .unwrap_or_else(String::new)
+        .unwrap_or_default()
         .split(';')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -196,7 +196,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let id = Url::parse(url)?
         .path()
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or("")
         .to_string();
 
@@ -222,34 +222,34 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
         if let Some(href) = anchor.value().attr("href") {
             let joined = base_url_parsed.join(href)?;
             let p = joined.path().trim_end_matches('/');
-            if let Some(caps) = chapter_re.captures(p) {
-                if caps.get(1).unwrap().as_str().ends_with(&manga_path) {
-                    let num_str = caps.get(2).unwrap().as_str();
-                    if let Ok(num) = Decimal::from_str_exact(num_str) {
-                        let label = anchor
-                            .text()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .trim()
-                            .to_string();
-                        let label = if label.is_empty() {
-                            format!("Chapter {}", num_str)
-                        } else {
-                            label
-                        };
-                        chapters.push(Chapter {
-                            number: num,
-                            label,
-                            url: joined.to_string(),
-                        });
-                    }
+            if let Some(caps) = chapter_re.captures(p)
+                && caps.get(1).unwrap().as_str().ends_with(&manga_path)
+            {
+                let num_str = caps.get(2).unwrap().as_str();
+                if let Ok(num) = Decimal::from_str_exact(num_str) {
+                    let label = anchor
+                        .text()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string();
+                    let label = if label.is_empty() {
+                        format!("Chapter {}", num_str)
+                    } else {
+                        label
+                    };
+                    chapters.push(Chapter {
+                        number: num,
+                        label,
+                        url: joined.to_string(),
+                    });
                 }
             }
         }
     }
 
     // Sort chapters ascending by number
-    chapters.sort_by(|a, b| a.number.cmp(&b.number));
+    chapters.sort_by_key(|a| a.number);
     chapters.dedup_by(|a, b| a.number == b.number);
 
     if chapters.is_empty() {
@@ -302,6 +302,9 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 }
 
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
+    let thzq_re = Regex::new(r"var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap();
+    let url_re = Regex::new(r#"['"](https?://[^'"]+)['"]"#).unwrap();
+
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
         let res = client.get(&url).send()?;
@@ -310,10 +313,8 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
         }
         let text = res.text()?;
 
-        let thzq_re = Regex::new(r"var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap();
         if let Some(caps) = thzq_re.captures(&text) {
             let array_content = caps.get(1).unwrap().as_str();
-            let url_re = Regex::new(r#"['"](https?://[^'"]+)['"]"#).unwrap();
             let mut urls = Vec::new();
             for m in url_re.captures_iter(array_content) {
                 // html unescape could be needed, but simple URLs rarely have it.
@@ -409,7 +410,7 @@ pub fn download_chapter(
             escape_xml(&manga.authors.join(", ")),
             escape_xml(&manga.alt_names.join(", ")),
         );
-        archive.start_file("ComicInfo.xml", options.clone())?;
+        archive.start_file("ComicInfo.xml", options)?;
         archive.write_all(comic_info.as_bytes())?;
 
         for (i, img_url) in urls.iter().enumerate() {
@@ -429,7 +430,7 @@ pub fn download_chapter(
                 .unwrap_or("");
             let ext = image_extension(ct, &data, img_url);
 
-            archive.start_file(format!("{:03}{}", i + 1, ext), options.clone())?;
+            archive.start_file(format!("{:03}{}", i + 1, ext), options)?;
             archive.write_all(&data)?;
 
             pb.inc(1);
