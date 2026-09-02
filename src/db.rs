@@ -12,6 +12,12 @@ const BACKOFF_MULTIPLIER: f64 = 1.5;
 
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path)?;
+
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;",
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS mangas (
             id TEXT PRIMARY KEY,
@@ -25,6 +31,14 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
         )",
         [],
     )?;
+
+    // Create a composite index to speed up query, preventing full table scans
+    // https://stackoverflow.com/questions/795031/how-do-composite-indexes-work#795068
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mangas_next_check ON mangas(status, next_check)",
+        [],
+    )?;
+
     Ok(conn)
 }
 
