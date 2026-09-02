@@ -49,14 +49,13 @@ pub enum NotificationType<'a> {
 }
 
 pub fn send_webhook(client: &Client, notify_type: NotificationType) {
-    let webhook_url = match std::env::var("DISCORD_WEBHOOK_URL") {
-        Ok(url) => url.trim_matches('"').trim_matches('\'').to_string(),
-        Err(_) => return,
+    let Some(webhook_url) = crate::config::DISCORD_WEBHOOK_URL.as_deref() else {
+        return;
     };
 
     let author = Author {
         name: "iFetch",
-        icon_url: "https://raw.githubusercontent.com/FelixSiegel/ifetch/refs/heads/main/assets/iFetch-logo.png", // Generic fetch/download icon
+        icon_url: "https://raw.githubusercontent.com/FelixSiegel/ifetch/refs/heads/main/assets/iFetch-logo.png",
     };
 
     let embed = match notify_type {
@@ -129,7 +128,7 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
         embeds: vec![embed],
     };
 
-    match client.post(&webhook_url).json(&payload).send() {
+    match client.post(webhook_url).json(&payload).send() {
         Ok(res) => {
             if !res.status().is_success() {
                 log::error!("Discord webhook failed with status: {}", res.status());

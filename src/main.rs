@@ -1,5 +1,7 @@
 mod cli;
+mod config;
 mod core;
+mod db;
 mod discord;
 mod models;
 mod server;
