@@ -266,10 +266,21 @@ fn handle_route(
 
 fn notify_discord(client: &Client, message: &str) {
     if let Ok(webhook_url) = std::env::var("DISCORD_WEBHOOK_URL") {
+        let webhook_url = webhook_url.trim_matches('"').trim_matches('\'');
         let payload = serde_json::json!({
             "content": message
         });
-        let _ = client.post(&webhook_url).json(&payload).send();
+        match client.post(webhook_url).json(&payload).send() {
+            Ok(res) => {
+                if !res.status().is_success() {
+                    error!("Discord webhook failed with status: {}", res.status());
+                    if let Ok(text) = res.text() {
+                        error!("Discord response: {}", text);
+                    }
+                }
+            }
+            Err(e) => error!("Failed to send Discord webhook: {}", e),
+        }
     }
 }
 
