@@ -67,14 +67,14 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
             chapter_count,
         } => Embed {
             author,
-            title: "Download Started",
+            title: manga_title,
             url: Some(manga_url),
             description: Some(description.to_string()),
             color: 0x3498db, // Blue
             fields: vec![
                 Field {
-                    name: "Manga",
-                    value: manga_title.to_string(),
+                    name: "Status",
+                    value: "Download Started".to_string(),
                     inline: true,
                 },
                 Field {
@@ -90,14 +90,14 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
             chapter_count,
         } => Embed {
             author,
-            title: "Download Completed",
+            title: manga_title,
             url: Some(manga_url),
             description: None,
             color: 0x2ecc71, // Green
             fields: vec![
                 Field {
-                    name: "Manga",
-                    value: manga_title.to_string(),
+                    name: "Status",
+                    value: "Download Completed".to_string(),
                     inline: true,
                 },
                 Field {
@@ -113,13 +113,13 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
             error_msg,
         } => Embed {
             author,
-            title: "Download Failed",
+            title: manga_title,
             url: Some(manga_url),
             description: Some(error_msg.to_string()),
             color: 0xe74c3c, // Red
             fields: vec![Field {
-                name: "Manga",
-                value: manga_title.to_string(),
+                name: "Status",
+                value: "Download Failed".to_string(),
                 inline: true,
             }],
         },
