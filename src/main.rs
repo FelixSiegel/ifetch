@@ -1,10 +1,12 @@
 mod cli;
 mod core;
+mod discord;
 mod models;
 mod server;
 mod utils;
 
 use crate::cli::Cli;
+use crate::utils::truncate_str;
 use clap::Parser;
 use std::process;
 use std::time::Duration;
@@ -43,9 +45,7 @@ fn run() -> anyhow::Result<()> {
     use console::style;
 
     let mut genres_str = manga.genres.join(", ");
-    if genres_str.chars().count() > 80 {
-        genres_str = genres_str.chars().take(77).collect::<String>() + "...";
-    }
+    genres_str = truncate_str(&genres_str, 80);
 
     println!(
         "\n{}\n{}\n{}\n\n{} chapters ({} - {})",

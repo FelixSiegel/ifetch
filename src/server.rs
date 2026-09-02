@@ -1,4 +1,6 @@
 use crate::core;
+use crate::discord::{NotificationType, send_webhook};
+use crate::utils::truncate_str;
 use anyhow::Result;
 use log::{error, info, warn};
 use reqwest::blocking::Client;
@@ -149,7 +151,17 @@ fn handle_route(
                 let output_bg = output_dir.to_path_buf();
                 let active_bg = active_downloads.clone();
                 std::thread::spawn(move || {
-                    let _ = download_background(&client_bg, &id_clone, &output_bg, threads);
+                    if let Err(e) = download_background(&client_bg, &id_clone, &output_bg, threads)
+                    {
+                        send_webhook(
+                            &client_bg,
+                            NotificationType::Error {
+                                manga_title: &id_clone,
+                                manga_url: &format!("https://mangakatana.com/manga/{}", id_clone),
+                                error_msg: &e.to_string(),
+                            },
+                        );
+                    }
                     active_bg.lock().unwrap().remove(&id_clone);
                 });
             }
@@ -264,26 +276,6 @@ fn handle_route(
     Ok(Response::from_string("Not Found").with_status_code(404))
 }
 
-fn notify_discord(client: &Client, message: &str) {
-    if let Ok(webhook_url) = std::env::var("DISCORD_WEBHOOK_URL") {
-        let webhook_url = webhook_url.trim_matches('"').trim_matches('\'');
-        let payload = serde_json::json!({
-            "content": message
-        });
-        match client.post(webhook_url).json(&payload).send() {
-            Ok(res) => {
-                if !res.status().is_success() {
-                    error!("Discord webhook failed with status: {}", res.status());
-                    if let Ok(text) = res.text() {
-                        error!("Discord response: {}", text);
-                    }
-                }
-            }
-            Err(e) => error!("Failed to send Discord webhook: {}", e),
-        }
-    }
-}
-
 fn download_background(client: &Client, id: &str, output_dir: &Path, threads: usize) -> Result<()> {
     use rayon::prelude::*;
     let url = format!("https://mangakatana.com/manga/{}", id);
@@ -294,7 +286,17 @@ fn download_background(client: &Client, id: &str, output_dir: &Path, threads: us
     let manga_output_dir = output_dir.join(folder_name);
     std::fs::create_dir_all(&manga_output_dir)?;
 
-    notify_discord(client, &format!("📥 **iFetch:** Started downloading `{}` ({} chapters)", manga.title, chapters.len()));
+    let desc = truncate_str(&manga.description, 200);
+
+    send_webhook(
+        client,
+        NotificationType::Start {
+            manga_title: &manga.title,
+            manga_url: &url,
+            description: &desc,
+            chapter_count: chapters.len(),
+        },
+    );
 
     let max_width = chapters
         .iter()
@@ -333,7 +335,15 @@ fn download_background(client: &Client, id: &str, output_dir: &Path, threads: us
         });
     });
 
-    notify_discord(client, &format!("✅ **iFetch:** Finished downloading `{}`", manga.title));
+    send_webhook(
+        client,
+        NotificationType::Success {
+            manga_title: &manga.title,
+            manga_url: &url,
+            chapter_count: chapters.len(),
+        },
+    );
+
     info!("Background download for {} completed.", id);
     Ok(())
 }

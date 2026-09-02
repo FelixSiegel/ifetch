@@ -111,3 +111,10 @@ pub fn escape_xml(text: &str) -> String {
         .replace("<", "&lt;")
         .replace(">", "&gt;")
 }
+
+pub fn truncate_str(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        None => s.to_string(),
+        Some((idx, _)) => format!("{}...", &s[..idx]),
+    }
+}
