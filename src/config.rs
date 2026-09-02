@@ -11,4 +11,4 @@ pub static DISCORD_WEBHOOK_URL: LazyLock<Option<String>> = LazyLock::new(|| {
     var("DISCORD_WEBHOOK_URL")
         .ok()
         .map(|url| url.trim_matches('"').trim_matches('\'').to_string())
-});I
+});
