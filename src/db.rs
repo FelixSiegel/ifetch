@@ -15,7 +15,8 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
 
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;",
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
     )?;
 
     conn.execute(
@@ -105,4 +106,14 @@ pub fn get_mangas_to_check(conn: &Connection) -> Result<Vec<MangaCheck>> {
 
     let mangas = stmt.query_map(params![now], |row| Ok(MangaCheck { id: row.get(0)? }))?;
     mangas.collect()
+}
+
+pub fn get_manga_title(conn: &Connection, id: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT title FROM mangas WHERE id = ?1")?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
 }

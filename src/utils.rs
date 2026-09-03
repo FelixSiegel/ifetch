@@ -1,6 +1,15 @@
 use anyhow::{Result, bail};
 use regex::Regex;
+use std::sync::LazyLock;
 use url::Url;
+
+static INVALID_CHARS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
+static SPACES_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+static SERIES_CHAPTER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap());
+static SERIES_MANGA_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
 
 pub fn series_url(value: &str) -> Result<Option<String>> {
     if !value.starts_with("http://") && !value.starts_with("https://") {
@@ -15,10 +24,7 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
 
     let path = parsed.path().trim_end_matches('/');
 
-    let chapter_re = Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap();
-    let manga_re = Regex::new(r"^/manga/[^/]+\.\d+$").unwrap();
-
-    let path = if let Some(caps) = chapter_re.captures(path) {
+    let path = if let Some(caps) = SERIES_CHAPTER_RE.captures(path) {
         caps.get(1).unwrap().as_str()
     } else if path.ends_with("/download") {
         path.strip_suffix("/download").unwrap()
@@ -26,7 +32,7 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
         path
     };
 
-    if !manga_re.is_match(path) {
+    if !SERIES_MANGA_RE.is_match(path) {
         bail!("Expected MangaKatana manga or chapter URL");
     }
 
@@ -49,12 +55,8 @@ pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
     }
 
     let mut name = format!("{} - Chapter {}", title, padded);
-
-    let invalid_re = Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap();
-    name = invalid_re.replace_all(&name, "").to_string();
-
-    let spaces_re = Regex::new(r"\s+").unwrap();
-    name = spaces_re.replace_all(&name, " ").to_string();
+    name = INVALID_CHARS_RE.replace_all(&name, "").to_string();
+    name = SPACES_RE.replace_all(&name, " ").to_string();
     name = name.trim_matches(|c| c == ' ' || c == '.').to_string();
 
     if name.is_empty() {
@@ -68,6 +70,48 @@ pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
     }
 
     format!("{}.cbz", name)
+}
+
+pub fn get_folder_name(title: &str) -> String {
+    let folder_name = title.replace(|c: char| r#"<>:"/\|?*"#.contains(c), "");
+    let folder_name = folder_name.trim();
+    if folder_name.is_empty() {
+        "manga".to_string()
+    } else {
+        folder_name.to_string()
+    }
+}
+
+pub fn find_chapter_cbz(
+    manga_dir: &std::path::Path,
+    title: &str,
+    number_str: &str,
+) -> Option<std::path::PathBuf> {
+    if !manga_dir.exists() {
+        return None;
+    }
+    for width in 1..=6 {
+        let path = manga_dir.join(chapter_filename(title, number_str, width));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub fn get_mime_type(filename: &str) -> &'static str {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".avif") {
+        "image/avif"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    }
 }
 
 pub fn image_extension(content_type: &str, data: &[u8], url_path: &str) -> &'static str {

@@ -73,17 +73,7 @@ fn run() -> anyhow::Result<()> {
 
     let chosen = core::select_chapters(&chapters, &spec)?;
 
-    // Clean title for folder name
-    let folder_name = manga
-        .title
-        .replace(|c: char| r#"<>:"/\|?*"#.contains(c), "");
-    let folder_name = folder_name.trim();
-    let folder_name = if folder_name.is_empty() {
-        "manga".to_string()
-    } else {
-        folder_name.to_string()
-    };
-
+    let folder_name = crate::utils::get_folder_name(&manga.title);
     let manga_output_dir = args.output.join(folder_name);
     std::fs::create_dir_all(&manga_output_dir)?;
 

@@ -7,7 +7,30 @@ use rust_decimal::Decimal;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 use std::io::Write;
+use std::sync::LazyLock;
 use url::Url;
+
+static MANGA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
+static CHAPTER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap());
+static THZQ_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap());
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"['"](https?://[^'"]+)['"]"#).unwrap());
+
+static H1_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").unwrap());
+static COVER_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".cover img").unwrap());
+static STATUS_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".status").unwrap());
+static ITEM_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".item").unwrap());
+static TITLE_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".title a").unwrap());
+static WRAP_IMG_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".wrap_img img").unwrap());
+static SUMMARY_P_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".summary p").unwrap());
+static GENRES_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".genres a").unwrap());
+static AUTHORS_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".authors a.author").unwrap());
+static ALT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".alt_name").unwrap());
+static ANCHOR_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 
 const BASE_URL: &str = "https://mangakatana.com/";
 
@@ -33,29 +56,25 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     let url = res.url().clone();
     let path = url.path().trim_end_matches('/');
 
-    let manga_re = Regex::new(r"^/manga/[^/]+\.\d+$").unwrap();
     let text = res.text()?;
     let doc = Html::parse_document(&text);
 
-    if manga_re.is_match(path) {
-        let title_sel = Selector::parse("h1").unwrap();
+    if MANGA_RE.is_match(path) {
         let title = doc
-            .select(&title_sel)
+            .select(&H1_SEL)
             .next()
             .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
             .unwrap_or_else(|| query.to_string());
 
-        let cover_sel = Selector::parse(".cover img").unwrap();
         let cover_url = doc
-            .select(&cover_sel)
+            .select(&COVER_SEL)
             .next()
             .and_then(|img| img.value().attr("src").or(img.value().attr("data-src")))
             .unwrap_or("")
             .to_string();
 
-        let status_sel = Selector::parse(".status").unwrap();
         let status = doc
-            .select(&status_sel)
+            .select(&STATUS_SEL)
             .next()
             .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
             .unwrap_or("".to_string());
@@ -75,17 +94,15 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
     let mut results = Vec::new();
     let mut seen = HashSet::new();
-    let item_sel = Selector::parse(".item").unwrap();
     let base_url_parsed = Url::parse(BASE_URL)?;
 
-    for item in doc.select(&item_sel) {
-        let title_sel = Selector::parse(".title a").unwrap();
-        if let Some(anchor) = item.select(&title_sel).next()
+    for item in doc.select(&ITEM_SEL) {
+        if let Some(anchor) = item.select(&TITLE_SEL).next()
             && let Some(href) = anchor.value().attr("href")
         {
             let joined = base_url_parsed.join(href)?;
             let p = joined.path().trim_end_matches('/');
-            if manga_re.is_match(p) && !seen.contains(joined.as_str()) {
+            if MANGA_RE.is_match(p) && !seen.contains(joined.as_str()) {
                 seen.insert(joined.to_string());
                 let title = anchor
                     .text()
@@ -94,17 +111,15 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
                     .trim()
                     .to_string();
 
-                let img_sel = Selector::parse(".wrap_img img").unwrap();
                 let cover_url = item
-                    .select(&img_sel)
+                    .select(&WRAP_IMG_SEL)
                     .next()
                     .and_then(|img| img.value().attr("data-src").or(img.value().attr("src")))
                     .unwrap_or("")
                     .to_string();
 
-                let status_sel = Selector::parse(".status").unwrap();
                 let status = item
-                    .select(&status_sel)
+                    .select(&STATUS_SEL)
                     .next()
                     .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
                     .unwrap_or("".to_string());
@@ -131,9 +146,8 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let text = res.text()?;
     let doc = Html::parse_document(&text);
 
-    let title_sel = Selector::parse("h1").unwrap();
     let title = doc
-        .select(&title_sel)
+        .select(&H1_SEL)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
         .unwrap_or_else(|| {
@@ -146,30 +160,26 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
                 .to_string()
         });
 
-    let desc_sel = Selector::parse(".summary p").unwrap();
     let description = doc
-        .select(&desc_sel)
+        .select(&SUMMARY_P_SEL)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
         .unwrap_or_default();
 
-    let genres_sel = Selector::parse(".genres a").unwrap();
     let genres: Vec<String> = doc
-        .select(&genres_sel)
+        .select(&GENRES_SEL)
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
-    let authors_sel = Selector::parse(".authors a.author").unwrap();
     let authors: Vec<String> = doc
-        .select(&authors_sel)
+        .select(&AUTHORS_SEL)
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
-    let alt_sel = Selector::parse(".alt_name").unwrap();
     let alt_names: Vec<String> = doc
-        .select(&alt_sel)
+        .select(&ALT_SEL)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
@@ -178,17 +188,15 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
         .filter(|s| !s.is_empty())
         .collect();
 
-    let cover_sel = Selector::parse(".cover img").unwrap();
     let cover_url = doc
-        .select(&cover_sel)
+        .select(&COVER_SEL)
         .next()
         .and_then(|img| img.value().attr("src").or(img.value().attr("data-src")))
         .unwrap_or("")
         .to_string();
 
-    let status_sel = Selector::parse(".status").unwrap();
     let status = doc
-        .select(&status_sel)
+        .select(&STATUS_SEL)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
         .unwrap_or("".to_string());
@@ -213,16 +221,14 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     };
 
     let mut chapters = Vec::new();
-    let anchor_sel = Selector::parse("a[href]").unwrap();
     let base_url_parsed = Url::parse(BASE_URL)?;
     let manga_path = Url::parse(url)?.path().trim_end_matches('/').to_string();
-    let chapter_re = Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap();
 
-    for anchor in doc.select(&anchor_sel) {
+    for anchor in doc.select(&ANCHOR_SEL) {
         if let Some(href) = anchor.value().attr("href") {
             let joined = base_url_parsed.join(href)?;
             let p = joined.path().trim_end_matches('/');
-            if let Some(caps) = chapter_re.captures(p)
+            if let Some(caps) = CHAPTER_RE.captures(p)
                 && caps.get(1).unwrap().as_str().ends_with(&manga_path)
             {
                 let num_str = caps.get(2).unwrap().as_str();
@@ -302,9 +308,6 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 }
 
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
-    let thzq_re = Regex::new(r"var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap();
-    let url_re = Regex::new(r#"['"](https?://[^'"]+)['"]"#).unwrap();
-
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
         let res = client.get(&url).send()?;
@@ -313,14 +316,14 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
         }
         let text = res.text()?;
 
-        if let Some(caps) = thzq_re.captures(&text) {
+        if let Some(caps) = THZQ_RE.captures(&text) {
             let array_content = caps.get(1).unwrap().as_str();
             let mut urls = Vec::new();
-            for m in url_re.captures_iter(array_content) {
-                // html unescape could be needed, but simple URLs rarely have it.
-                // We'll use a simple replace for common entities if needed, or rely on URL parsing.
+            for m in URL_RE.captures_iter(array_content) {
                 let mut u = m.get(1).unwrap().as_str().to_string();
-                u = u.replace("&amp;", "&");
+                if u.contains("&amp;") {
+                    u = u.replace("&amp;", "&");
+                }
                 urls.push(u);
             }
             if !urls.is_empty() {
@@ -332,6 +335,7 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
 }
 
 use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
 
 use crate::utils::{chapter_filename, image_extension};
@@ -386,7 +390,8 @@ pub fn download_chapter(
 
     let result: Result<()> = (|| {
         let file = File::create(&temp)?;
-        let mut archive = zip::ZipWriter::new(file);
+        let writer = BufWriter::new(file);
+        let mut archive = zip::ZipWriter::new(writer);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
