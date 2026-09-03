@@ -20,6 +20,7 @@ use tiny_http::{Header, Response, Server};
 use url::Url;
 
 pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
+    let _ = std::fs::create_dir_all(&output_dir);
     env_logger::init();
     let server = Server::http(format!("0.0.0.0:{}", port)).unwrap();
     info!("Server running on http://0.0.0.0:{}", port);
@@ -131,12 +132,8 @@ fn handle_route(
         let manga_dir = output_dir.join(&folder);
         let _ = std::fs::create_dir_all(&manga_dir);
 
-        let max_width = chapters
-            .iter()
-            .map(|c| c.number.to_string().split('.').next().unwrap().len())
-            .max()
-            .unwrap_or(3)
-            .max(3);
+        let max_width = crate::utils::determine_width(&chapters);
+        crate::utils::upgrade_padding(&manga.title, &chapters, &manga_dir, max_width);
 
         let mut existing_chapters = Vec::new();
         for chapter in &chapters {
@@ -218,12 +215,7 @@ fn handle_route(
             let url = format!("https://mangakatana.com/manga/{}", id);
             let (manga, chapters) = manga_chapters(client, &url)?;
 
-            let max_width = chapters
-                .iter()
-                .map(|c| c.number.to_string().split('.').next().unwrap().len())
-                .max()
-                .unwrap_or(3)
-                .max(3);
+            let max_width = crate::utils::determine_width(&chapters);
             let filename = chapter_filename(&manga.title, number, max_width);
             let folder = get_folder_name(&manga.title);
             let cbz_path = output_dir.join(&folder).join(&filename);
@@ -269,12 +261,7 @@ fn handle_route(
                 let url = format!("https://mangakatana.com/manga/{}", id);
                 let (manga, chapters) = manga_chapters(client, &url)?;
 
-                let max_width = chapters
-                    .iter()
-                    .map(|c| c.number.to_string().split('.').next().unwrap().len())
-                    .max()
-                    .unwrap_or(3)
-                    .max(3);
+                let max_width = crate::utils::determine_width(&chapters);
                 let cbz_filename = chapter_filename(&manga.title, number, max_width);
                 let folder = get_folder_name(&manga.title);
                 let cbz_path = output_dir.join(&folder).join(&cbz_filename);
@@ -283,7 +270,7 @@ fn handle_route(
                 let mut archive = zip::ZipArchive::new(file)?;
                 let mut img_file = archive.by_name(filename)?;
 
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(img_file.size() as usize);
                 img_file.read_to_end(&mut buf)?;
 
                 let ct = if filename.ends_with(".png") {
@@ -324,12 +311,7 @@ fn download_background(client: &Client, id: &str, output_dir: &Path, threads: us
         },
     );
 
-    let max_width = chapters
-        .iter()
-        .map(|c| c.number.to_string().split('.').next().unwrap().len())
-        .max()
-        .unwrap_or(3)
-        .max(3);
+    let max_width = crate::utils::determine_width(&chapters);
 
     let current_index = std::sync::atomic::AtomicUsize::new(0);
     let chosen_len = chapters.len();
@@ -399,12 +381,8 @@ fn run_cron(
             if let Ok((manga, chapters)) = manga_chapters(client, &url) {
                 let folder = get_folder_name(&manga.title);
                 let manga_dir = output_dir.join(&folder);
-                let max_width = chapters
-                    .iter()
-                    .map(|c| c.number.to_string().split('.').next().unwrap().len())
-                    .max()
-                    .unwrap_or(3)
-                    .max(3);
+                let max_width = crate::utils::determine_width(&chapters);
+                crate::utils::upgrade_padding(&manga.title, &chapters, &manga_dir, max_width);
 
                 let mut local_count = 0;
                 for chapter in &chapters {
