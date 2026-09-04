@@ -85,7 +85,6 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
-          flavor: lower=true
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.tag }}
