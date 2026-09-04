@@ -49,7 +49,7 @@ pub fn upsert_manga(
     title: &str,
     status: &str,
     remote_chapters: usize,
-    local_chapters: usize,
+    local_chapters: Option<usize>,
     did_update: bool,
 ) -> Result<()> {
     let now = SystemTime::now()
@@ -73,19 +73,20 @@ pub fn upsert_manga(
     };
 
     let next_check = now + (new_interval * SECONDS_PER_HOUR);
+    let local_val = local_chapters.map(|c| c as i64);
 
     conn.execute(
         "INSERT INTO mangas (id, title, status, remote_chapters, local_chapters, last_checked, next_check, check_interval_hours)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 0), ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
          title = excluded.title,
          status = excluded.status,
          remote_chapters = excluded.remote_chapters,
-         local_chapters = excluded.local_chapters,
+         local_chapters = COALESCE(?5, mangas.local_chapters),
          last_checked = excluded.last_checked,
          next_check = excluded.next_check,
          check_interval_hours = excluded.check_interval_hours",
-        params![id, title, status, remote_chapters as i64, local_chapters as i64, now, next_check, new_interval],
+        params![id, title, status, remote_chapters as i64, local_val, now, next_check, new_interval],
     )?;
 
     Ok(())

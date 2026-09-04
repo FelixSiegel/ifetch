@@ -8,6 +8,8 @@ use scraper::{Html, Selector};
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::LazyLock;
+use std::thread;
+use std::time::Duration;
 use url::Url;
 
 static MANGA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
@@ -43,7 +45,7 @@ pub fn build_client() -> Result<Client> {
 
     Client::builder()
         .default_headers(headers)
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
         .build()
         .context("Failed to build HTTP client")
 }
@@ -419,21 +421,60 @@ pub fn download_chapter(
         archive.write_all(comic_info.as_bytes())?;
 
         for (i, img_url) in urls.iter().enumerate() {
-            let mut res = client
-                .get(img_url)
-                .header("Referer", &chapter.url)
-                .send()?
-                .error_for_status()?;
+            let mut attempts = 0;
+            let max_attempts = 3;
+            let (data, ct) = loop {
+                attempts += 1;
+                let fetch_res = (|| -> Result<(Vec<u8>, String)> {
+                    let mut res = client
+                        .get(img_url)
+                        .header("Referer", &chapter.url)
+                        .send()?
+                        .error_for_status()?;
 
-            let mut data = Vec::new();
-            res.copy_to(&mut data)?;
+                    let ct = res
+                        .headers()
+                        .get("Content-Type")
+                        .and_then(|h| h.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
 
-            let ct = res
-                .headers()
-                .get("Content-Type")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("");
-            let ext = image_extension(ct, &data, img_url);
+                    let mut data = match res.content_length() {
+                        Some(len) if len < 50 * 1024 * 1024 => Vec::with_capacity(len as usize),
+                        _ => Vec::new(),
+                    };
+                    res.copy_to(&mut data)?;
+                    Ok((data, ct))
+                })();
+
+                match fetch_res {
+                    Ok(val) => break val,
+                    Err(e) if attempts < max_attempts => {
+                        log::warn!(
+                            "Retrying image {}/{} for chapter {} after error: {}",
+                            i + 1,
+                            urls.len(),
+                            chapter.number,
+                            e
+                        );
+                        thread::sleep(Duration::from_millis(500 * attempts as u64));
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "Failed to download image {}/{} for chapter {} ({}) after {} attempts",
+                                i + 1,
+                                urls.len(),
+                                chapter.number,
+                                img_url,
+                                max_attempts
+                            )
+                        });
+                    }
+                }
+            };
+
+            let ext = image_extension(&ct, &data, img_url);
 
             archive.start_file(format!("{:03}{}", i + 1, ext), options)?;
             archive.write_all(&data)?;

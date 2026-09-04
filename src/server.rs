@@ -10,11 +10,16 @@ use anyhow::Result;
 use log::{error, info, warn};
 use reqwest::blocking::Client;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     io::Read,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
-    thread::sleep,
+    panic::{self, catch_unwind},
+    path::PathBuf,
+    sync::{
+        self, Arc, Mutex, MutexGuard,
+        atomic::Ordering,
+        mpsc::{Sender, channel},
+    },
+    thread::{Builder, JoinHandle, sleep, spawn},
     time::Duration,
 };
 use tiny_http::{Header, Response, Server};
@@ -26,15 +31,136 @@ fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+pub struct DownloadPool {
+    sender: Sender<Job>,
+    _workers: Vec<JoinHandle<()>>,
+}
+
+impl DownloadPool {
+    pub fn new(threads: usize) -> Self {
+        let (sender, receiver) = channel::<Job>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut workers = Vec::with_capacity(threads);
+
+        for id in 0..threads {
+            let rx = Arc::clone(&receiver);
+            let handle = Builder::new()
+                .name(format!("ifetch-dl-{}", id))
+                .spawn(move || {
+                    loop {
+                        let job = {
+                            let rx_guard = match rx.lock() {
+                                Ok(g) => g,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            match rx_guard.recv() {
+                                Ok(job) => job,
+                                Err(_) => break, // Pool shutting down
+                            }
+                        };
+
+                        if let Err(panic_err) = catch_unwind(panic::AssertUnwindSafe(job)) {
+                            error!("Download worker {} caught panic: {:?}", id, panic_err);
+                        }
+                    }
+                })
+                .expect("Failed to spawn download worker thread");
+            workers.push(handle);
+        }
+
+        Self {
+            sender,
+            _workers: workers,
+        }
+    }
+
+    pub fn spawn<F>(&self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        if let Err(e) = self.sender.send(Box::new(f)) {
+            error!("Failed to queue download task: {}", e);
+        }
+    }
+}
+
+struct ImageLruCache {
+    max_bytes: usize,
+    current_bytes: usize,
+    entries: HashMap<String, Arc<[u8]>>,
+    order: VecDeque<(String, usize)>,
+}
+
+impl ImageLruCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            current_bytes: 0,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Arc<[u8]>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: String, data: Arc<[u8]>) {
+        let size = data.len();
+        if size > self.max_bytes {
+            return;
+        }
+
+        if let Some(existing) = self.entries.remove(&key) {
+            self.current_bytes = self.current_bytes.saturating_sub(existing.len());
+            self.order.retain(|(k, _)| k != &key);
+        }
+
+        while self.current_bytes + size > self.max_bytes {
+            if let Some((old_key, old_size)) = self.order.pop_front() {
+                self.entries.remove(&old_key);
+                self.current_bytes = self.current_bytes.saturating_sub(old_size);
+            } else {
+                break;
+            }
+        }
+
+        self.current_bytes += size;
+        self.entries.insert(key.clone(), data);
+        self.order.push_back((key, size));
+    }
+}
+
+struct ServerCache {
+    manga_dirs: Mutex<HashMap<String, (String, PathBuf)>>,
+    chapter_pages: Mutex<HashMap<String, Vec<String>>>,
+    image_cache: Mutex<ImageLruCache>,
+}
+
+impl ServerCache {
+    fn new(max_image_bytes: usize) -> Self {
+        Self {
+            manga_dirs: Mutex::new(HashMap::new()),
+            chapter_pages: Mutex::new(HashMap::new()),
+            image_cache: Mutex::new(ImageLruCache::new(max_image_bytes)),
+        }
+    }
+}
+
 struct DownloadGuard {
     id: String,
     active_downloads: Arc<Mutex<HashSet<String>>>,
+    disarmed: bool,
 }
 
 impl Drop for DownloadGuard {
     fn drop(&mut self) {
-        let mut active = lock_mutex(&self.active_downloads);
-        active.remove(&self.id);
+        if !self.disarmed {
+            let mut active = lock_mutex(&self.active_downloads);
+            active.remove(&self.id);
+        }
     }
 }
 
@@ -83,29 +209,28 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
         }
     };
 
-    let output_dir = Arc::new(output_dir);
-    let active_downloads = Arc::new(Mutex::new(HashSet::new()));
-
-    let client_cron = Arc::clone(&client);
-    let output_cron = Arc::clone(&output_dir);
-    let active_cron = Arc::clone(&active_downloads);
-    let db_cron = Arc::clone(&db);
-    std::thread::spawn(move || {
-        run_cron(&client_cron, &output_cron, threads, &active_cron, &db_cron);
+    let state = Arc::new(AppState {
+        client,
+        output_dir: Arc::new(output_dir),
+        active_downloads: Arc::new(Mutex::new(HashSet::new())),
+        db,
+        download_pool: Arc::new(DownloadPool::new(threads)),
+        cache: Arc::new(ServerCache::new(64 * 1024 * 1024)), // 64 MB LRU image cache
     });
 
-    // Bounded pool of worker threads prevents OS thread exhaustion under load
+    let state_cron = Arc::clone(&state);
+    spawn(move || {
+        run_cron(&state_cron);
+    });
+
     let worker_count = (threads * 2).clamp(4, 16);
     let mut handles = Vec::with_capacity(worker_count);
 
     for _ in 0..worker_count {
         let server = Arc::clone(&server);
-        let client = Arc::clone(&client);
-        let output_dir = Arc::clone(&output_dir);
-        let active_downloads = Arc::clone(&active_downloads);
-        let db = Arc::clone(&db);
+        let state = Arc::clone(&state);
 
-        let handle = std::thread::spawn(move || {
+        let handle = spawn(move || {
             loop {
                 let request = match server.recv() {
                     Ok(req) => req,
@@ -125,29 +250,28 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
                 };
 
                 let path = parsed_url.path().to_string();
-                let query: std::collections::HashMap<_, _> =
-                    parsed_url.query_pairs().into_owned().collect();
+                let query: HashMap<_, _> = parsed_url.query_pairs().into_owned().collect();
 
                 info!("Received {} {}", request.method().as_str(), path);
 
-                let response = handle_route(
-                    &path,
-                    &query,
-                    &client,
-                    &output_dir,
-                    threads,
-                    &active_downloads,
-                    &db,
-                );
+                let response = catch_unwind(panic::AssertUnwindSafe(|| {
+                    handle_route(&path, &query, &state)
+                }));
 
                 match response {
-                    Ok(resp) => {
+                    Ok(Ok(resp)) => {
                         let _ = request.respond(resp);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!("Error handling request {}: {}", path, e);
                         let _ = request.respond(
                             Response::from_string(format!("Error: {}", e)).with_status_code(500),
+                        );
+                    }
+                    Err(panic_err) => {
+                        error!("Panic while handling request {}: {:?}", path, panic_err);
+                        let _ = request.respond(
+                            Response::from_string("Internal Server Error").with_status_code(500),
                         );
                     }
                 }
@@ -161,51 +285,151 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
     }
 }
 
-fn resolve_manga(
-    id: &str,
-    client: &Client,
-    output_dir: &Path,
-    db: &Arc<Mutex<rusqlite::Connection>>,
-) -> Result<(String, PathBuf)> {
+struct AppState {
+    client: Arc<Client>,
+    output_dir: Arc<PathBuf>,
+    active_downloads: Arc<Mutex<HashSet<String>>>,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    download_pool: Arc<DownloadPool>,
+    cache: Arc<ServerCache>,
+}
+
+fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
+    if let Ok(dirs) = state.cache.manga_dirs.lock()
+        && let Some(entry) = dirs.get(id).cloned()
+    {
+        return Ok(entry);
+    }
+
     let manga_title = {
-        let conn = lock_mutex(db);
+        let conn = lock_mutex(&state.db);
         get_manga_title(&conn, id).unwrap_or(None)
     };
 
     if let Some(title) = manga_title {
         let folder = get_folder_name(&title);
-        Ok((title, output_dir.join(folder)))
+        let dir = state.output_dir.join(folder);
+        if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
+            dirs.insert(id.to_string(), (title.clone(), dir.clone()));
+        }
+        Ok((title, dir))
     } else {
         let url = format!("https://mangakatana.com/manga/{}", id);
-        let (manga, chapters) = manga_chapters(client, &url)?;
+        let (manga, chapters) = manga_chapters(&state.client, &url)?;
         let folder = get_folder_name(&manga.title);
-        let manga_dir = output_dir.join(&folder);
+        let manga_dir = state.output_dir.join(&folder);
         let _ = upsert_manga(
-            &lock_mutex(db),
+            &lock_mutex(&state.db),
             id,
             &manga.title,
             &manga.status,
             chapters.len(),
-            0,
+            None,
             false,
         );
+        if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
+            dirs.insert(id.to_string(), (manga.title.clone(), manga_dir.clone()));
+        }
         Ok((manga.title, manga_dir))
     }
 }
 
-fn spawn_background_download(
-    client: &Client,
+struct MangaDownloadTracker {
+    id: String,
+    manga: Manga,
+    url: String,
+    total_chapters: usize,
+    missing_count: usize,
+    remaining: sync::atomic::AtomicUsize,
+    success_count: sync::atomic::AtomicUsize,
+    error_count: sync::atomic::AtomicUsize,
+    first_error: Mutex<Option<String>>,
+    output_dir: PathBuf,
+    max_width: usize,
+    chapters: Vec<Chapter>,
+}
+
+fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) {
+    if let Ok(mut pages) = state.cache.chapter_pages.lock() {
+        pages.retain(|k, _| !k.starts_with(&format!("{}::", tracker.id)));
+    }
+
+    let total_successes = tracker.success_count.load(Ordering::Relaxed);
+    let total_errors = tracker.error_count.load(Ordering::Relaxed);
+
+    let mut local_count = 0;
+    for chapter in &tracker.chapters {
+        let filename = chapter_filename(
+            &tracker.manga.title,
+            &chapter.number.to_string(),
+            tracker.max_width,
+        );
+        if tracker.output_dir.join(&filename).exists() {
+            local_count += 1;
+        }
+    }
+
+    let did_update = total_successes > 0;
+    let _ = upsert_manga(
+        &lock_mutex(&state.db),
+        &tracker.id,
+        &tracker.manga.title,
+        &tracker.manga.status,
+        tracker.total_chapters,
+        Some(local_count),
+        did_update,
+    );
+
+    if total_errors > 0 && total_successes == 0 {
+        let err_msg = tracker
+            .first_error
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "All chapter downloads failed".to_string());
+        error!("Background download for {} failed: {}", tracker.id, err_msg);
+        send_webhook(
+            &state.client,
+            NotificationType::Error {
+                manga_title: &tracker.manga.title,
+                manga_url: &tracker.url,
+                error_msg: &err_msg,
+            },
+        );
+    } else {
+        if total_errors > 0 {
+            warn!(
+                "Background download for {} partially succeeded ({} succeeded, {} failed out of {}).",
+                tracker.id, total_successes, total_errors, tracker.missing_count
+            );
+        }
+        send_webhook(
+            &state.client,
+            NotificationType::Success {
+                manga_title: &tracker.manga.title,
+                manga_url: &tracker.url,
+                chapter_count: total_successes,
+            },
+        );
+        info!(
+            "Background download for {} completed ({} / {} total chapters).",
+            tracker.id, local_count, tracker.total_chapters
+        );
+    }
+
+    let mut active = lock_mutex(&state.active_downloads);
+    active.remove(&tracker.id);
+}
+
+fn queue_background_download(
     id: &str,
-    output_dir: &Path,
-    threads: usize,
-    active_downloads: &Arc<Mutex<HashSet<String>>>,
-    db: &Arc<Mutex<rusqlite::Connection>>,
+    state: &Arc<AppState>,
     preloaded: Option<(Manga, Vec<Chapter>)>,
 ) {
-    let mut active = lock_mutex(active_downloads);
+    let mut active = lock_mutex(&state.active_downloads);
     if active.contains(id) {
         info!(
-            "Download for {} is already in progress. Skipping duplicate thread.",
+            "Download for {} is already queued or in progress. Skipping duplicate.",
             id
         );
         return;
@@ -214,51 +438,166 @@ fn spawn_background_download(
     drop(active);
 
     info!(
-        "Missing chapters detected for {}. Triggering background download.",
+        "Missing chapters detected for {}. Enqueuing background download.",
         id
     );
 
-    let client_bg = client.clone();
-    let output_bg = output_dir.to_path_buf();
-    let active_bg = Arc::clone(active_downloads);
-    let db_bg = Arc::clone(db);
-    let id_clone = id.to_string();
+    let id = id.to_string();
+    let pool = Arc::clone(&state.download_pool);
+    let state = Arc::clone(state);
 
-    std::thread::spawn(move || {
-        let _guard = DownloadGuard {
-            id: id_clone.clone(),
-            active_downloads: active_bg,
+    pool.spawn(move || {
+        let mut guard = DownloadGuard {
+            id: id.clone(),
+            active_downloads: Arc::clone(&state.active_downloads),
+            disarmed: false,
         };
 
-        if let Err(e) = download_background(
-            &client_bg, &id_clone, &output_bg, threads, &db_bg, preloaded,
-        ) {
-            error!("Background download for {} failed: {}", id_clone, e);
-            send_webhook(
-                &client_bg,
-                NotificationType::Error {
-                    manga_title: &id_clone,
-                    manga_url: &format!("https://mangakatana.com/manga/{}", id_clone),
-                    error_msg: &e.to_string(),
-                },
+        let (manga, chapters) = match preloaded {
+            Some(data) => data,
+            None => {
+                let url = format!("https://mangakatana.com/manga/{}", id);
+                match manga_chapters(&state.client, &url) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("Failed to fetch chapter list for {}: {}", id, e);
+                        send_webhook(
+                            &state.client,
+                            NotificationType::Error {
+                                manga_title: &id,
+                                manga_url: &url,
+                                error_msg: &e.to_string(),
+                            },
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
+        let url = format!("https://mangakatana.com/manga/{}", id);
+        let folder_name = get_folder_name(&manga.title);
+        let manga_output_dir = state.output_dir.join(&folder_name);
+        if let Err(e) = std::fs::create_dir_all(&manga_output_dir) {
+            error!(
+                "Failed to create directory {}: {}",
+                manga_output_dir.display(),
+                e
             );
+            return;
+        }
+
+        if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
+            dirs.insert(id.clone(), (manga.title.clone(), manga_output_dir.clone()));
+        }
+
+        let max_width = crate::utils::determine_width(&chapters);
+        crate::utils::upgrade_padding(&manga.title, &chapters, &manga_output_dir, max_width);
+
+        let missing: Vec<Chapter> = chapters
+            .iter()
+            .filter(|ch| {
+                let filename = chapter_filename(&manga.title, &ch.number.to_string(), max_width);
+                !manga_output_dir.join(&filename).exists()
+            })
+            .cloned()
+            .collect();
+
+        if missing.is_empty() {
+            let _ = upsert_manga(
+                &lock_mutex(&state.db),
+                &id,
+                &manga.title,
+                &manga.status,
+                chapters.len(),
+                Some(chapters.len()),
+                false,
+            );
+            info!("All chapters for {} already downloaded.", id);
+            return;
+        }
+
+        let desc = truncate_str(&manga.description, 200);
+        send_webhook(
+            &state.client,
+            NotificationType::Start {
+                manga_title: &manga.title,
+                manga_url: &url,
+                description: &desc,
+                chapter_count: missing.len(),
+            },
+        );
+
+        let missing_len = missing.len();
+        let tracker = Arc::new(MangaDownloadTracker {
+            id: id.clone(),
+            manga: manga.clone(),
+            url,
+            total_chapters: chapters.len(),
+            missing_count: missing_len,
+            remaining: sync::atomic::AtomicUsize::new(missing_len),
+            success_count: sync::atomic::AtomicUsize::new(0),
+            error_count: sync::atomic::AtomicUsize::new(0),
+            first_error: Mutex::new(None),
+            output_dir: manga_output_dir,
+            max_width,
+            chapters: chapters.clone(),
+        });
+
+        // Disarm guard: tracker completion logic handles removing from active_downloads
+        guard.disarmed = true;
+
+        for chapter in missing {
+            let tracker = Arc::clone(&tracker);
+            let pool = Arc::clone(&state.download_pool);
+            let state = Arc::clone(&state);
+
+            pool.spawn(move || {
+                let pb = indicatif::ProgressBar::hidden();
+                let res = core::download_chapter(
+                    &state.client,
+                    &tracker.manga,
+                    &chapter,
+                    &tracker.output_dir,
+                    tracker.max_width,
+                    false,
+                    &pb,
+                );
+
+                match res {
+                    Ok(Some(_)) | Ok(None) => {
+                        tracker.success_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to download chapter {} for {}: {}",
+                            chapter.number, tracker.manga.title, e
+                        );
+                        tracker.error_count.fetch_add(1, Ordering::Relaxed);
+                        let mut fe = tracker.first_error.lock().unwrap();
+                        if fe.is_none() {
+                            *fe = Some(e.to_string());
+                        }
+                    }
+                }
+
+                if tracker.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    on_manga_download_complete(&tracker, &state);
+                }
+            });
         }
     });
 }
 
 fn handle_route(
     path: &str,
-    query: &std::collections::HashMap<String, String>,
-    client: &Client,
-    output_dir: &Path,
-    threads: usize,
-    active_downloads: &Arc<Mutex<HashSet<String>>>,
-    db: &Arc<Mutex<rusqlite::Connection>>,
+    query: &HashMap<String, String>,
+    state: &Arc<AppState>,
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     // GET /api/search?q={query}
     if path == "/api/search" {
         if let Some(q) = query.get("q") {
-            let results = core::search_manga(client, q)?;
+            let results = core::search_manga(&state.client, q)?;
             let json = serde_json::to_string(&results)?;
             return Ok(Response::from_string(json).with_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
@@ -276,14 +615,14 @@ fn handle_route(
             return Ok(Response::from_string("Invalid manga ID").with_status_code(400));
         }
         let url = format!("https://mangakatana.com/manga/{}", id);
-        let (manga, chapters) = manga_chapters(client, &url)?;
+        let (manga, chapters) = manga_chapters(&state.client, &url)?;
         let _ = upsert_manga(
-            &lock_mutex(db),
+            &lock_mutex(&state.db),
             id,
             &manga.title,
             &manga.status,
             chapters.len(),
-            0,
+            None,
             false,
         );
         let json = serde_json::to_string(&manga)?;
@@ -300,11 +639,15 @@ fn handle_route(
             return Ok(Response::from_string("Invalid manga ID").with_status_code(400));
         }
         let url = format!("https://mangakatana.com/manga/{}", id);
-        let (manga, chapters) = manga_chapters(client, &url)?;
+        let (manga, chapters) = manga_chapters(&state.client, &url)?;
 
         let folder = get_folder_name(&manga.title);
-        let manga_dir = output_dir.join(&folder);
+        let manga_dir = state.output_dir.join(&folder);
         let _ = std::fs::create_dir_all(&manga_dir);
+
+        if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
+            dirs.insert(id.to_string(), (manga.title.clone(), manga_dir.clone()));
+        }
 
         let max_width = crate::utils::determine_width(&chapters);
         crate::utils::upgrade_padding(&manga.title, &chapters, &manga_dir, max_width);
@@ -319,25 +662,17 @@ fn handle_route(
         }
 
         let _ = upsert_manga(
-            &lock_mutex(db),
+            &lock_mutex(&state.db),
             id,
             &manga.title,
             &manga.status,
             chapters.len(),
-            existing_chapters.len(),
+            Some(existing_chapters.len()),
             false,
         );
 
         if existing_chapters.len() < chapters.len() {
-            spawn_background_download(
-                client,
-                id,
-                output_dir,
-                threads,
-                active_downloads,
-                db,
-                Some((manga, chapters)),
-            );
+            queue_background_download(id, state, Some((manga, chapters)));
 
             if existing_chapters.is_empty() {
                 return Ok(Response::from_string("").with_status_code(202).with_header(
@@ -365,7 +700,16 @@ fn handle_route(
                 return Ok(Response::from_string("Invalid chapter ID").with_status_code(400));
             }
 
-            let (title, manga_dir) = resolve_manga(id, client, output_dir, db)?;
+            if let Ok(pages_map) = state.cache.chapter_pages.lock()
+                && let Some(pages) = pages_map.get(chap_id).cloned()
+            {
+                let json = serde_json::to_string(&pages)?;
+                return Ok(Response::from_string(json).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                ));
+            }
+
+            let (title, manga_dir) = resolve_manga(id, state)?;
 
             let cbz_path = match find_chapter_cbz(&manga_dir, &title, number) {
                 Some(p) => p,
@@ -387,6 +731,11 @@ fn handle_route(
                 .collect();
 
             pages.sort();
+
+            if let Ok(mut pages_map) = state.cache.chapter_pages.lock() {
+                pages_map.insert(chap_id.to_string(), pages.clone());
+            }
+
             let json = serde_json::to_string(&pages)?;
             return Ok(Response::from_string(json).with_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
@@ -414,7 +763,25 @@ fn handle_route(
                     return Ok(Response::from_string("Invalid chapter ID").with_status_code(400));
                 }
 
-                let (title, manga_dir) = resolve_manga(id, client, output_dir, db)?;
+                let cache_key = format!("{}/{}", chap_id, filename);
+                if let Ok(img_cache) = state.cache.image_cache.lock()
+                    && let Some(cached_data) = img_cache.get(&cache_key)
+                {
+                    let ct = get_mime_type(filename);
+                    return Ok(Response::from_data(cached_data.to_vec())
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                &b"Cache-Control"[..],
+                                &b"public, max-age=31536000, immutable"[..],
+                            )
+                            .unwrap(),
+                        ));
+                }
+
+                let (title, manga_dir) = resolve_manga(id, state)?;
 
                 let cbz_path = match find_chapter_cbz(&manga_dir, &title, number) {
                     Some(p) => p,
@@ -433,12 +800,18 @@ fn handle_route(
                     }
                 };
 
-                let mut buf = Vec::with_capacity(img_file.size() as usize);
+                let max_img_size = img_file.size().min(50 * 1024 * 1024) as usize;
+                let mut buf = Vec::with_capacity(max_img_size);
                 img_file.read_to_end(&mut buf)?;
+
+                let arc_data: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
+                if let Ok(mut img_cache) = state.cache.image_cache.lock() {
+                    img_cache.insert(cache_key, Arc::clone(&arc_data));
+                }
 
                 let ct = get_mime_type(filename);
 
-                return Ok(Response::from_data(buf)
+                return Ok(Response::from_data(arc_data.to_vec())
                     .with_header(Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap())
                     .with_header(
                         Header::from_bytes(
@@ -454,139 +827,7 @@ fn handle_route(
     Ok(Response::from_string("Not Found").with_status_code(404))
 }
 
-fn download_background(
-    client: &Client,
-    id: &str,
-    output_dir: &Path,
-    threads: usize,
-    db: &Arc<Mutex<rusqlite::Connection>>,
-    preloaded: Option<(Manga, Vec<Chapter>)>,
-) -> Result<()> {
-    use rayon::prelude::*;
-
-    let (manga, chapters) = match preloaded {
-        Some(data) => data,
-        None => {
-            let url = format!("https://mangakatana.com/manga/{}", id);
-            manga_chapters(client, &url)?
-        }
-    };
-
-    let url = format!("https://mangakatana.com/manga/{}", id);
-    let folder_name = get_folder_name(&manga.title);
-    let manga_output_dir = output_dir.join(folder_name);
-    std::fs::create_dir_all(&manga_output_dir)?;
-
-    let max_width = crate::utils::determine_width(&chapters);
-    crate::utils::upgrade_padding(&manga.title, &chapters, &manga_output_dir, max_width);
-
-    // Identify missing chapters to download
-    let missing: Vec<&Chapter> = chapters
-        .iter()
-        .filter(|ch| {
-            let filename = chapter_filename(&manga.title, &ch.number.to_string(), max_width);
-            !manga_output_dir.join(&filename).exists()
-        })
-        .collect();
-
-    if missing.is_empty() {
-        let _ = upsert_manga(
-            &lock_mutex(db),
-            id,
-            &manga.title,
-            &manga.status,
-            chapters.len(),
-            chapters.len(),
-            false,
-        );
-        info!("All chapters for {} already downloaded.", id);
-        return Ok(());
-    }
-
-    let desc = truncate_str(&manga.description, 200);
-
-    send_webhook(
-        client,
-        NotificationType::Start {
-            manga_title: &manga.title,
-            manga_url: &url,
-            description: &desc,
-            chapter_count: missing.len(),
-        },
-    );
-
-    let current_index = std::sync::atomic::AtomicUsize::new(0);
-    let missing_len = missing.len();
-    let pb = indicatif::ProgressBar::hidden();
-
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()?;
-
-    pool.install(|| {
-        (0..threads).into_par_iter().for_each(|_| {
-            loop {
-                let i = current_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= missing_len {
-                    break;
-                }
-                let chapter = missing[i];
-                let _ = core::download_chapter(
-                    client,
-                    &manga,
-                    chapter,
-                    &manga_output_dir,
-                    max_width,
-                    false,
-                    &pb,
-                );
-            }
-        });
-    });
-
-    let mut local_count = 0;
-    for chapter in &chapters {
-        let filename = chapter_filename(&manga.title, &chapter.number.to_string(), max_width);
-        if manga_output_dir.join(&filename).exists() {
-            local_count += 1;
-        }
-    }
-
-    let _ = upsert_manga(
-        &lock_mutex(db),
-        id,
-        &manga.title,
-        &manga.status,
-        chapters.len(),
-        local_count,
-        true,
-    );
-
-    send_webhook(
-        client,
-        NotificationType::Success {
-            manga_title: &manga.title,
-            manga_url: &url,
-            chapter_count: missing_len,
-        },
-    );
-
-    info!(
-        "Background download for {} completed ({} / {} total chapters).",
-        id,
-        local_count,
-        chapters.len()
-    );
-    Ok(())
-}
-
-fn run_cron(
-    client: &Client,
-    output_dir: &Path,
-    threads: usize,
-    active_downloads: &Arc<Mutex<HashSet<String>>>,
-    db: &Arc<Mutex<rusqlite::Connection>>,
-) {
+fn run_cron(state: &Arc<AppState>) {
     if *CRON_HOURS <= 0 {
         info!("IFETCH_CRON_HOURS is <= 0. Auto-updates disabled.");
         return;
@@ -595,54 +836,53 @@ fn run_cron(
     sleep(Duration::from_secs(60));
 
     loop {
-        info!("Starting periodic auto-update cron job...");
-        let mangas_to_check = {
-            let conn = lock_mutex(db);
-            get_mangas_to_check(&conn).unwrap_or_default()
-        };
+        let cron_cycle = catch_unwind(panic::AssertUnwindSafe(|| {
+            info!("Starting periodic auto-update cron job...");
+            let mangas_to_check = {
+                let conn = lock_mutex(&state.db);
+                get_mangas_to_check(&conn).unwrap_or_default()
+            };
 
-        for manga_chk in mangas_to_check {
-            sleep(Duration::from_secs(2));
-            let url = format!("https://mangakatana.com/manga/{}", manga_chk.id);
-            if let Ok((manga, chapters)) = manga_chapters(client, &url) {
-                let folder = get_folder_name(&manga.title);
-                let manga_dir = output_dir.join(&folder);
-                let max_width = crate::utils::determine_width(&chapters);
-                crate::utils::upgrade_padding(&manga.title, &chapters, &manga_dir, max_width);
+            for manga_chk in mangas_to_check {
+                sleep(Duration::from_secs(2));
+                let url = format!("https://mangakatana.com/manga/{}", manga_chk.id);
+                if let Ok((manga, chapters)) = manga_chapters(&state.client, &url) {
+                    let folder = get_folder_name(&manga.title);
+                    let manga_dir = state.output_dir.join(&folder);
+                    let max_width = crate::utils::determine_width(&chapters);
+                    crate::utils::upgrade_padding(&manga.title, &chapters, &manga_dir, max_width);
 
-                let mut local_count = 0;
-                for chapter in &chapters {
-                    let filename =
-                        chapter_filename(&manga.title, &chapter.number.to_string(), max_width);
-                    if manga_dir.join(&filename).exists() {
-                        local_count += 1;
+                    let mut local_count = 0;
+                    for chapter in &chapters {
+                        let filename =
+                            chapter_filename(&manga.title, &chapter.number.to_string(), max_width);
+                        if manga_dir.join(&filename).exists() {
+                            local_count += 1;
+                        }
+                    }
+
+                    let did_update = local_count < chapters.len();
+                    let _ = upsert_manga(
+                        &lock_mutex(&state.db),
+                        &manga_chk.id,
+                        &manga.title,
+                        &manga.status,
+                        chapters.len(),
+                        Some(local_count),
+                        did_update,
+                    );
+
+                    if did_update {
+                        queue_background_download(&manga_chk.id, state, Some((manga, chapters)));
                     }
                 }
-
-                let did_update = local_count < chapters.len();
-                let _ = upsert_manga(
-                    &lock_mutex(db),
-                    &manga_chk.id,
-                    &manga.title,
-                    &manga.status,
-                    chapters.len(),
-                    local_count,
-                    did_update,
-                );
-
-                if did_update {
-                    spawn_background_download(
-                        client,
-                        &manga_chk.id,
-                        output_dir,
-                        threads,
-                        active_downloads,
-                        db,
-                        Some((manga, chapters)),
-                    );
-                }
             }
+        }));
+
+        if let Err(e) = cron_cycle {
+            error!("Cron cycle encountered panic: {:?}", e);
         }
+
         sleep(Duration::from_secs(3600));
     }
 }

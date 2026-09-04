@@ -21,7 +21,8 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    let args = Cli::parse();
+    let mut args = Cli::parse();
+    args.threads = args.threads.max(1);
 
     if args.server {
         server::run_server(args.port, args.output, args.threads);

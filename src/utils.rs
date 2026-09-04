@@ -54,31 +54,43 @@ pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
         padded.push_str(parts[1]);
     }
 
-    let mut name = format!("{} - Chapter {}", title, padded);
-    name = INVALID_CHARS_RE.replace_all(&name, "").to_string();
-    name = SPACES_RE.replace_all(&name, " ").to_string();
-    name = name.trim_matches(|c| c == ' ' || c == '.').to_string();
+    let mut clean_title = INVALID_CHARS_RE.replace_all(title, "").to_string();
+    clean_title = SPACES_RE.replace_all(&clean_title, " ").to_string();
+    clean_title = clean_title.trim_matches([' ', '.']).to_string();
 
-    if name.is_empty() {
-        name = "manga".to_string();
+    if clean_title.is_empty() {
+        clean_title = "manga".to_string();
     }
 
-    let mut chars: Vec<char> = name.chars().collect();
-    if chars.len() > 140 {
-        chars.truncate(140);
-        name = chars.into_iter().collect();
+    let mut chars: Vec<char> = clean_title.chars().collect();
+    if chars.len() > 100 {
+        chars.truncate(100);
+        clean_title = chars.into_iter().collect();
+        clean_title = clean_title.trim_end_matches([' ', '.']).to_string();
     }
 
-    format!("{}.cbz", name)
+    format!("{} - Chapter {}.cbz", clean_title, padded)
 }
 
 pub fn get_folder_name(title: &str) -> String {
-    let folder_name = title.replace(|c: char| r#"<>:"/\|?*"#.contains(c), "");
-    let folder_name = folder_name.trim();
+    let folder_name = INVALID_CHARS_RE.replace_all(title, "");
+    let folder_name = SPACES_RE.replace_all(&folder_name, " ");
+    let mut folder_name = folder_name.trim_matches([' ', '.']).to_string();
+    if folder_name.is_empty() {
+        return "manga".to_string();
+    }
+
+    let mut chars: Vec<char> = folder_name.chars().collect();
+    if chars.len() > 120 {
+        chars.truncate(120);
+        folder_name = chars.into_iter().collect();
+        folder_name = folder_name.trim_end_matches([' ', '.']).to_string();
+    }
+
     if folder_name.is_empty() {
         "manga".to_string()
     } else {
-        folder_name.to_string()
+        folder_name
     }
 }
 
@@ -90,7 +102,7 @@ pub fn find_chapter_cbz(
     if !manga_dir.exists() {
         return None;
     }
-    for width in 1..=6 {
+    for width in [3, 4, 5, 6, 2, 1] {
         let path = manga_dir.join(chapter_filename(title, number_str, width));
         if path.exists() {
             return Some(path);
