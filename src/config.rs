@@ -10,5 +10,6 @@ pub static CRON_HOURS: LazyLock<i64> = LazyLock::new(|| {
 pub static DISCORD_WEBHOOK_URL: LazyLock<Option<String>> = LazyLock::new(|| {
     var("DISCORD_WEBHOOK_URL")
         .ok()
-        .map(|url| url.trim_matches('"').trim_matches('\'').to_string())
+        .map(|url| url.trim_matches('"').trim_matches('\'').trim().to_string())
+        .filter(|url| !url.is_empty())
 });

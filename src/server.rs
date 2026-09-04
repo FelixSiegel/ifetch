@@ -7,7 +7,7 @@ pub mod state;
 use crate::{
     config::CRON_HOURS,
     core::{self, manga_chapters},
-    db::{get_mangas_to_check, init_db, upsert_manga},
+    db::{CheckTrigger, get_mangas_to_check, init_db, upsert_manga},
     server::{
         cache::ServerCache,
         downloader::{DownloadPool, queue_background_download},
@@ -30,6 +30,8 @@ use tiny_http::{Response, Server};
 use url::Url;
 
 pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
+    let _ = env_logger::try_init();
+
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
         error!(
             "Failed to create output directory {}: {}",
@@ -38,7 +40,6 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
         );
         return;
     }
-    let _ = env_logger::try_init();
 
     let server = match Server::http(format!("0.0.0.0:{}", port)) {
         Ok(s) => Arc::new(s),
@@ -188,7 +189,9 @@ fn run_cron(state: &Arc<AppState>) {
                         &manga.status,
                         chapters.len(),
                         Some(local_count),
-                        did_update,
+                        CheckTrigger::Cron {
+                            new_chapters: did_update,
+                        },
                     );
 
                     if did_update {

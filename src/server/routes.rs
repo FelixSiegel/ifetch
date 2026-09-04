@@ -1,6 +1,6 @@
 use crate::{
     core::{self, manga_chapters},
-    db::{get_manga_title, upsert_manga},
+    db::{CheckTrigger, get_manga_title, upsert_manga},
     server::{
         downloader::queue_background_download,
         helpers::{
@@ -72,7 +72,9 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
         &manga.status,
         chapters.len(),
         None,
-        false,
+        CheckTrigger::UserRequest {
+            new_chapters: false,
+        },
     );
 
     json_response(&manga)
@@ -107,6 +109,7 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
         }
     }
 
+    let has_new = existing_chapters.len() < chapters.len();
     let _ = upsert_manga(
         &lock_mutex(&state.db),
         id,
@@ -114,10 +117,12 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
         &manga.status,
         chapters.len(),
         Some(existing_chapters.len()),
-        false,
+        CheckTrigger::UserRequest {
+            new_chapters: has_new,
+        },
     );
 
-    if existing_chapters.len() < chapters.len() {
+    if has_new {
         queue_background_download(id, state, Some((manga, chapters)));
 
         if existing_chapters.is_empty() {
@@ -185,7 +190,7 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
     };
 
     let cache_key = format!("{}/{}", chap_id, filename);
-    if let Ok(img_cache) = state.cache.image_cache.lock()
+    if let Ok(mut img_cache) = state.cache.image_cache.lock()
         && let Some(cached_data) = img_cache.get(&cache_key)
     {
         let ct = get_mime_type(filename);
@@ -254,7 +259,9 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
             &manga.status,
             chapters.len(),
             None,
-            false,
+            CheckTrigger::UserRequest {
+                new_chapters: false,
+            },
         );
         if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
             dirs.insert(id.to_string(), (manga.title.clone(), manga_dir.clone()));

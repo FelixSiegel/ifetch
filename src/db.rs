@@ -43,6 +43,16 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
     Ok(conn)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckTrigger {
+    /// Periodic background cron check: backs off if no new chapters found
+    Cron { new_chapters: bool },
+    /// User requested or viewed: updates last_checked, resets or preserves interval, never backs off
+    UserRequest { new_chapters: bool },
+    /// Download finished: updates chapter counts, resets interval on success
+    DownloadComplete { success: bool },
+}
+
 pub fn upsert_manga(
     conn: &Connection,
     id: &str,
@@ -50,29 +60,65 @@ pub fn upsert_manga(
     status: &str,
     remote_chapters: usize,
     local_chapters: Option<usize>,
-    did_update: bool,
+    trigger: CheckTrigger,
 ) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
-    let new_interval = if did_update {
-        *CRON_HOURS
-    } else {
-        let current_interval = conn
-            .query_row(
-                "SELECT check_interval_hours FROM mangas WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(*CRON_HOURS);
+    let (new_interval, next_check) = match trigger {
+        CheckTrigger::Cron { new_chapters: true }
+        | CheckTrigger::UserRequest { new_chapters: true }
+        | CheckTrigger::DownloadComplete { success: true } => {
+            let interval = *CRON_HOURS;
+            (interval, now + (interval * SECONDS_PER_HOUR))
+        }
+        CheckTrigger::Cron {
+            new_chapters: false,
+        } => {
+            let current_interval = conn
+                .query_row(
+                    "SELECT check_interval_hours FROM mangas WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(*CRON_HOURS);
 
-        let backed_off = (current_interval as f64 * BACKOFF_MULTIPLIER) as i64;
-        backed_off.min(MAX_INTERVAL_HOURS)
+            let backed_off = ((current_interval as f64 * BACKOFF_MULTIPLIER) as i64)
+                .clamp(*CRON_HOURS, MAX_INTERVAL_HOURS);
+            (backed_off, now + (backed_off * SECONDS_PER_HOUR))
+        }
+        CheckTrigger::UserRequest {
+            new_chapters: false,
+        } => {
+            let current_interval = conn
+                .query_row(
+                    "SELECT check_interval_hours FROM mangas WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(*CRON_HOURS);
+            (
+                current_interval,
+                now + (current_interval * SECONDS_PER_HOUR),
+            )
+        }
+        CheckTrigger::DownloadComplete { success: false } => {
+            let current_interval = conn
+                .query_row(
+                    "SELECT check_interval_hours FROM mangas WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(*CRON_HOURS);
+            (
+                current_interval,
+                now + (current_interval * SECONDS_PER_HOUR),
+            )
+        }
     };
 
-    let next_check = now + (new_interval * SECONDS_PER_HOUR);
     let local_val = local_chapters.map(|c| c as i64);
 
     conn.execute(

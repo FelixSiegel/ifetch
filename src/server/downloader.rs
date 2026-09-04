@@ -1,6 +1,6 @@
 use crate::{
     core::{self, manga_chapters},
-    db::upsert_manga,
+    db::{CheckTrigger, upsert_manga},
     discord::{NotificationType, send_webhook},
     models::{Chapter, Manga},
     server::{helpers::lock_mutex, state::AppState},
@@ -194,7 +194,9 @@ pub fn queue_background_download(
                 &manga.status,
                 chapters.len(),
                 Some(chapters.len()),
-                false,
+                CheckTrigger::UserRequest {
+                    new_chapters: false,
+                },
             );
             info!("All chapters for {} already downloaded.", id);
             return;
@@ -300,7 +302,9 @@ fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) 
         &tracker.manga.status,
         tracker.total_chapters,
         Some(local_count),
-        did_update,
+        CheckTrigger::DownloadComplete {
+            success: did_update,
+        },
     );
 
     if total_errors > 0 && total_successes == 0 {
