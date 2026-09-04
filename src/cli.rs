@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "ifetch")]
+#[command(version)]
 #[command(about = "Download MangaKatana chapters as CBZ files.", long_about = None)]
 pub struct Cli {
     /// Search text or MangaKatana URL
