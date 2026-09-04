@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(short, long, env = "IFETCH_OUTPUT", default_value = "downloads")]
     pub output: PathBuf,
 
+    /// Config directory
+    #[arg(short = 'C', long, env = "IFETCH_CONFIG", default_value = "config")]
+    pub config: PathBuf,
+
     /// List chapters without downloading
     #[arg(long)]
     pub list: bool,

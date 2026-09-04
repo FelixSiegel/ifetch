@@ -29,13 +29,22 @@ use std::{
 use tiny_http::{Response, Server};
 use url::Url;
 
-pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
+pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: usize) {
     let _ = env_logger::try_init();
 
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
         error!(
             "Failed to create output directory {}: {}",
             output_dir.display(),
+            e
+        );
+        return;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&config_dir) {
+        error!(
+            "Failed to create config directory {}: {}",
+            config_dir.display(),
             e
         );
         return;
@@ -58,7 +67,7 @@ pub fn run_server(port: u16, output_dir: PathBuf, threads: usize) {
         }
     };
 
-    let db_path = output_dir.join("library.db");
+    let db_path = config_dir.join("library.db");
     let db = match init_db(&db_path) {
         Ok(d) => Arc::new(Mutex::new(d)),
         Err(e) => {

@@ -31,6 +31,7 @@ COPY --from=builder /usr/src/ifetch/target/release/ifetch /usr/local/bin/ifetch
 ENV IFETCH_SERVER=true
 ENV IFETCH_PORT=8080
 ENV IFETCH_OUTPUT=/app/downloads
+ENV IFETCH_CONFIG=/app/config
 ENV RUST_LOG=info
 
 EXPOSE 8080

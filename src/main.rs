@@ -25,7 +25,7 @@ fn run() -> anyhow::Result<()> {
     args.threads = args.threads.max(1);
 
     if args.server {
-        server::run_server(args.port, args.output, args.threads);
+        server::run_server(args.port, args.output, args.config, args.threads);
         return Ok(());
     }
 
