@@ -11,6 +11,10 @@ static SERIES_CHAPTER_RE: LazyLock<Regex> =
 static SERIES_MANGA_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
 
+/// Normalizes and extracts the canonical MangaKatana series URL from a user-provided input.
+///
+/// If input is an absolute URL pointing to MangaKatana (either the main series page or a
+/// chapter URL), returns `Some(canonical_url)`. Otherwise returns `None`.
 pub fn series_url(value: &str) -> Result<Option<String>> {
     if !value.starts_with("http://") && !value.starts_with("https://") {
         return Ok(None);
@@ -40,6 +44,9 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
     Ok(Some(base.join(path)?.to_string()))
 }
 
+/// Generates a sanitized, zero-padded filename for a chapter CBZ archive.
+///
+/// For example: `"Initial D - Chapter 001.cbz"`
 pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
     let parts: Vec<&str> = number_str.split('.').collect();
     let whole = parts[0];
@@ -72,6 +79,7 @@ pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
     format!("{} - Chapter {}.cbz", clean_title, padded)
 }
 
+/// Computes a filesystem-safe directory name for a given manga title.
 pub fn get_folder_name(title: &str) -> String {
     let folder_name = INVALID_CHARS_RE.replace_all(title, "");
     let folder_name = SPACES_RE.replace_all(&folder_name, " ");
@@ -94,6 +102,7 @@ pub fn get_folder_name(title: &str) -> String {
     }
 }
 
+/// Searches for an existing CBZ file for a chapter across multiple possible padding widths.
 pub fn find_chapter_cbz(
     manga_dir: &std::path::Path,
     title: &str,
@@ -111,6 +120,7 @@ pub fn find_chapter_cbz(
     None
 }
 
+/// Infers the MIME type string from a filename's extension.
 pub fn get_mime_type(filename: &str) -> &'static str {
     let lower = filename.to_ascii_lowercase();
     if lower.ends_with(".png") {
@@ -126,6 +136,8 @@ pub fn get_mime_type(filename: &str) -> &'static str {
     }
 }
 
+/// Determines the file extension (`.jpg`, `.png`, etc.) using HTTP Content-Type headers,
+/// magic bytes inspection, or URL path fallback.
 pub fn image_extension(content_type: &str, data: &[u8], url_path: &str) -> &'static str {
     let ct = content_type
         .split(';')
@@ -162,12 +174,14 @@ pub fn image_extension(content_type: &str, data: &[u8], url_path: &str) -> &'sta
     }
 }
 
+/// Escapes XML special characters for inclusion in `ComicInfo.xml`.
 pub fn escape_xml(text: &str) -> String {
     text.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
 }
 
+/// Truncates a string to at most `max_chars` unicode characters, appending `"..."` if truncated.
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
         None => s.to_string(),
@@ -175,6 +189,8 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Calculates the zero-padding digit width required for the given list of chapters.
+/// Guarantees a minimum width of 3 digits.
 pub fn determine_width(chapters: &[crate::models::Chapter]) -> usize {
     // We can not be sure if chapters are sorted, as we use in-official API,
     // so we need to iter instead of calling last or first :C
@@ -182,6 +198,7 @@ pub fn determine_width(chapters: &[crate::models::Chapter]) -> usize {
     max_num.trunc().to_string().len().max(3)
 }
 
+/// Upgrades filenames of previously downloaded chapters to the target padding width if necessary.
 pub fn upgrade_padding(
     title: &str,
     chapters: &[crate::models::Chapter],
@@ -220,4 +237,33 @@ pub fn upgrade_padding(
             }
         }
     }
+}
+
+/// Scans the manga directory for existing chapters, upgrades filename padding if needed,
+/// and partitions the chapters into already downloaded chapters and missing chapters.
+pub fn scan_manga_chapters(
+    manga_dir: &std::path::Path,
+    title: &str,
+    chapters: &[crate::models::Chapter],
+) -> (
+    usize,
+    Vec<crate::models::Chapter>,
+    Vec<crate::models::Chapter>,
+) {
+    let width = determine_width(chapters);
+    upgrade_padding(title, chapters, manga_dir, width);
+
+    let mut existing = Vec::new();
+    let mut missing = Vec::new();
+
+    for chapter in chapters {
+        let filename = chapter_filename(title, &chapter.number.to_string(), width);
+        if manga_dir.join(&filename).exists() {
+            existing.push(chapter.clone());
+        } else {
+            missing.push(chapter.clone());
+        }
+    }
+
+    (width, existing, missing)
 }

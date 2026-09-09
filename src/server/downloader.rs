@@ -4,7 +4,7 @@ use crate::{
     discord::{NotificationType, send_webhook},
     models::{Chapter, Manga},
     server::{helpers::lock_mutex, state::AppState},
-    utils::{self, chapter_filename, get_folder_name, truncate_str, upgrade_padding},
+    utils::{get_folder_name, scan_manga_chapters, truncate_str},
 };
 use log::{error, info, warn};
 use std::{
@@ -21,12 +21,14 @@ use std::{
 
 pub type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// Thread pool specifically dedicated to executing background chapter downloads.
 pub struct DownloadPool {
     sender: Sender<Job>,
     _workers: Vec<JoinHandle<()>>,
 }
 
 impl DownloadPool {
+    /// Spawns a new download pool with `threads` worker threads.
     pub fn new(threads: usize) -> Self {
         let (sender, receiver) = channel::<Job>();
         let receiver = Arc::new(Mutex::new(receiver));
@@ -64,6 +66,7 @@ impl DownloadPool {
         }
     }
 
+    /// Queues a closure to be executed by the download worker pool.
     pub fn spawn<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
@@ -74,6 +77,7 @@ impl DownloadPool {
     }
 }
 
+/// RAII guard ensuring the manga ID is removed from `active_downloads` if early exit occurs.
 pub struct DownloadGuard {
     id: String,
     active_downloads: Arc<Mutex<HashSet<String>>>,
@@ -89,6 +93,7 @@ impl Drop for DownloadGuard {
     }
 }
 
+/// Tracks asynchronous progress and completion across individual chapter download tasks.
 pub struct MangaDownloadTracker {
     id: String,
     manga: Manga,
@@ -104,6 +109,9 @@ pub struct MangaDownloadTracker {
     chapters: Vec<Chapter>,
 }
 
+/// Initiates or queues a background download of all missing chapters for the given manga ID.
+///
+/// Prevents concurrent duplicate downloads for the same manga ID.
 pub fn queue_background_download(
     id: &str,
     state: &Arc<AppState>,
@@ -174,17 +182,8 @@ pub fn queue_background_download(
             dirs.insert(id.clone(), (manga.title.clone(), manga_output_dir.clone()));
         }
 
-        let max_width = utils::determine_width(&chapters);
-        upgrade_padding(&manga.title, &chapters, &manga_output_dir, max_width);
-
-        let missing: Vec<Chapter> = chapters
-            .iter()
-            .filter(|ch| {
-                let filename = chapter_filename(&manga.title, &ch.number.to_string(), max_width);
-                !manga_output_dir.join(&filename).exists()
-            })
-            .cloned()
-            .collect();
+        let (max_width, existing, missing) =
+            scan_manga_chapters(&manga_output_dir, &manga.title, &chapters);
 
         if missing.is_empty() {
             let _ = upsert_manga(
@@ -202,7 +201,6 @@ pub fn queue_background_download(
             return;
         }
 
-        let existing_count = chapters.len().saturating_sub(missing.len());
         let desc = truncate_str(&manga.description, 200);
         send_webhook(
             &state.client,
@@ -211,7 +209,7 @@ pub fn queue_background_download(
                 manga_url: &url,
                 description: &desc,
                 total_chapters: chapters.len(),
-                existing_chapters: existing_count,
+                existing_chapters: existing.len(),
                 missing_chapters: missing.len(),
             },
         );
@@ -301,6 +299,7 @@ pub fn queue_background_download(
     });
 }
 
+/// Helper function to check if an error corresponds to rate limiting or Cloudflare blocking.
 fn is_rate_limit_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     msg.contains("Rate limited")
@@ -310,6 +309,7 @@ fn is_rate_limit_error(e: &anyhow::Error) -> bool {
         || msg.contains("Cloudflare")
 }
 
+/// Finalizer invoked when the last chapter task for a manga finishes downloading.
 fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) {
     if let Ok(mut pages) = state.cache.chapter_pages.lock() {
         pages.retain(|k, _| !k.starts_with(&format!("{}::", tracker.id)));
@@ -318,17 +318,9 @@ fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) 
     let total_successes = tracker.success_count.load(Ordering::Relaxed);
     let total_errors = tracker.error_count.load(Ordering::Relaxed);
 
-    let mut local_count = 0;
-    for chapter in &tracker.chapters {
-        let filename = chapter_filename(
-            &tracker.manga.title,
-            &chapter.number.to_string(),
-            tracker.max_width,
-        );
-        if tracker.output_dir.join(&filename).exists() {
-            local_count += 1;
-        }
-    }
+    let (_, existing, _) =
+        scan_manga_chapters(&tracker.output_dir, &tracker.manga.title, &tracker.chapters);
+    let local_count = existing.len();
 
     let did_update = total_successes > 0;
     let _ = upsert_manga(

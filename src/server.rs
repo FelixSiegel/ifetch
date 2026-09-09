@@ -17,7 +17,7 @@ use crate::{
         routes::handle_route,
         state::AppState,
     },
-    utils::{chapter_filename, get_folder_name},
+    utils::get_folder_name,
 };
 use log::{error, info, warn};
 use std::{
@@ -31,6 +31,8 @@ use std::{
 use tiny_http::{Response, Server};
 use url::Url;
 
+/// Starts the Tachiyomi/Mihon compatible HTTP server, initializes the background download pool,
+/// cache, database, and scheduled cron auto-updater.
 pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: usize) {
     let _ = env_logger::try_init();
 
@@ -159,6 +161,7 @@ pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: 
     }
 }
 
+/// Periodic background task that checks for new chapters of stored mangas and queues downloads.
 fn run_cron(state: &Arc<AppState>) {
     if *CRON_HOURS <= 0 {
         info!("IFETCH_CRON_HOURS is <= 0. Auto-updates disabled.");
@@ -181,19 +184,10 @@ fn run_cron(state: &Arc<AppState>) {
                 if let Ok((manga, chapters)) = manga_chapters(&state.client, &url) {
                     let folder = get_folder_name(&manga.title);
                     let manga_dir = state.output_dir.join(&folder);
-                    let max_width = crate::utils::determine_width(&chapters);
-                    crate::utils::upgrade_padding(&manga.title, &chapters, &manga_dir, max_width);
-
-                    let mut local_count = 0;
-                    for chapter in &chapters {
-                        let filename =
-                            chapter_filename(&manga.title, &chapter.number.to_string(), max_width);
-                        if manga_dir.join(&filename).exists() {
-                            local_count += 1;
-                        }
-                    }
-
-                    let did_update = local_count < chapters.len();
+                    let (_, existing, missing) =
+                        crate::utils::scan_manga_chapters(&manga_dir, &manga.title, &chapters);
+                    let local_count = existing.len();
+                    let did_update = !missing.is_empty();
                     let _ = upsert_manga(
                         &lock_mutex(&state.db),
                         &manga_chk.id,

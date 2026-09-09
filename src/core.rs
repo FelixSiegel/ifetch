@@ -1,4 +1,5 @@
 use crate::models::{Chapter, Manga};
+use crate::utils::{chapter_filename, image_extension};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use reqwest::blocking::Client;
@@ -6,11 +7,14 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use rust_decimal::Decimal;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 use url::Url;
+use zip::write::SimpleFileOptions;
 
 static MANGA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
 static CHAPTER_RE: LazyLock<Regex> =
@@ -40,7 +44,9 @@ pub fn build_client() -> Result<Client> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36")
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        ),
     );
 
     Client::builder()
@@ -50,6 +56,8 @@ pub fn build_client() -> Result<Client> {
         .context("Failed to build HTTP client")
 }
 
+/// Detects whether an HTTP response indicates a Cloudflare challenge, bot verification,
+/// or rate limiting response.
 pub fn is_cloudflare_or_rate_limited(status: reqwest::StatusCode, body: &str) -> bool {
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status == reqwest::StatusCode::FORBIDDEN
@@ -61,7 +69,6 @@ pub fn is_cloudflare_or_rate_limited(status: reqwest::StatusCode, body: &str) ->
     // Cloudflare challenges and bot blocks are always in the HTML head/top section.
     // Inspect only the first 4KB to avoid scanning large HTML payloads.
     let prefix = if body.len() > 4096 {
-        // Find safe UTF-8 boundary around 4096 bytes
         match body.char_indices().take_while(|(i, _)| *i <= 4096).last() {
             Some((i, c)) => &body[..i + c.len_utf8()],
             None => body,
@@ -75,9 +82,14 @@ pub fn is_cloudflare_or_rate_limited(status: reqwest::StatusCode, body: &str) ->
         || prefix.contains("cf-browser-verification")
         || prefix.contains("Checking your browser")
         || prefix.contains("Attention Required! | Cloudflare")
-        || (prefix.contains("Cloudflare") && prefix.contains("Ray ID") && !prefix.contains("var thzq"))
+        || (prefix.contains("Cloudflare")
+            && prefix.contains("Ray ID")
+            && !prefix.contains("var thzq"))
 }
 
+/// Searches MangaKatana for manga matching the given query keyword.
+///
+/// Returns a list of matching `Manga` entries, or an error if rate-limited or unavailable.
 pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     let res = client
         .get(Url::parse_with_params(BASE_URL, &[("search", query)])?)
@@ -178,6 +190,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     Ok(results)
 }
 
+/// Fetches manga metadata and the complete sorted list of chapters from a series URL.
 pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>)> {
     let res = client.get(url).send()?.error_for_status()?;
     let status = res.status();
@@ -247,6 +260,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
 
     let id = Url::parse(url)?
         .path()
+        .trim_end_matches('/')
         .split('/')
         .next_back()
         .unwrap_or("")
@@ -308,6 +322,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     Ok((manga, chapters))
 }
 
+/// Filters chapters by a user-specified string (e.g. `"all"`, `"1-10"`, `"1,3,5.5"`).
 pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>> {
     let spec = spec.trim().to_lowercase();
     if spec == "all" || spec.is_empty() {
@@ -351,6 +366,7 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
     Ok(res)
 }
 
+/// Fetches image URLs for a chapter by probing MangaKatana server mirrors (`""`, `"?sv=mk"`, `"?sv=3"`).
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
     let mut hit_rate_limit = false;
     let mut last_status = None;
@@ -406,13 +422,98 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
     bail!("Chapter contains no downloadable images")
 }
 
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+/// Generates the `ComicInfo.xml` metadata file contents for a CBZ archive.
+pub fn generate_comic_info(manga: &Manga, chapter: &Chapter) -> String {
+    use crate::utils::escape_xml;
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Title>{}</Title>
+  <Series>{}</Series>
+  <Number>{}</Number>
+  <Summary>{}</Summary>
+  <Genre>{}</Genre>
+  <Writer>{}</Writer>
+  <AlternateSeries>{}</AlternateSeries>
+</ComicInfo>"#,
+        escape_xml(&chapter.label),
+        escape_xml(&manga.title),
+        chapter.number,
+        escape_xml(&manga.description),
+        escape_xml(&manga.genres.join(", ")),
+        escape_xml(&manga.authors.join(", ")),
+        escape_xml(&manga.alt_names.join(", ")),
+    )
+}
 
-use crate::utils::{chapter_filename, image_extension};
-use zip::write::SimpleFileOptions;
+/// Verifies whether an existing CBZ file matches the expected page count (including ComicInfo.xml).
+pub fn is_chapter_up_to_date(dest: &Path, expected_page_count: usize) -> bool {
+    (|| -> Result<bool> {
+        let file = File::open(dest)?;
+        let archive = zip::ZipArchive::new(file)?;
+        Ok(archive.len() == expected_page_count + 1)
+    })()
+    .unwrap_or(false)
+}
 
+/// Fetches a single image with retries, exponential backoff, and Content-Type inspection.
+pub fn fetch_single_image(
+    client: &Client,
+    img_url: &str,
+    referer: &str,
+    max_attempts: usize,
+) -> Result<(Vec<u8>, String)> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let fetch_res = (|| -> Result<(Vec<u8>, String)> {
+            let mut res = client
+                .get(img_url)
+                .header("Referer", referer)
+                .send()?
+                .error_for_status()?;
+
+            let ct = res
+                .headers()
+                .get("Content-Type")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+
+            let mut data = match res.content_length() {
+                Some(len) if len < 50 * 1024 * 1024 => Vec::with_capacity(len as usize),
+                _ => Vec::new(),
+            };
+            res.copy_to(&mut data)?;
+            Ok((data, ct))
+        })();
+
+        match fetch_res {
+            Ok(val) => return Ok(val),
+            Err(e) if attempts < max_attempts => {
+                log::warn!(
+                    "Retrying image ({}) after error: {} (attempt {}/{})",
+                    img_url,
+                    e,
+                    attempts,
+                    max_attempts
+                );
+                thread::sleep(Duration::from_millis(500 * attempts as u64));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Failed to download image ({}) after {} attempts",
+                        img_url, max_attempts
+                    )
+                });
+            }
+        }
+    }
+}
+
+/// Downloads all pages for a chapter, builds a `ComicInfo.xml` metadata file,
+/// and packages the content into a CBZ archive.
 pub fn download_chapter(
     client: &Client,
     manga: &Manga,
@@ -421,7 +522,7 @@ pub fn download_chapter(
     width: usize,
     verify: bool,
     pb: &indicatif::ProgressBar,
-) -> Result<Option<std::path::PathBuf>> {
+) -> Result<Option<PathBuf>> {
     let filename = chapter_filename(&manga.title, &chapter.number.to_string(), width);
     let dest = output_dir.join(&filename);
 
@@ -434,15 +535,7 @@ pub fn download_chapter(
     let urls = chapter_images(client, &chapter.url)?;
 
     if dest.exists() {
-        let is_updated = (|| -> Result<bool> {
-            let file = std::fs::File::open(&dest)?;
-            let archive = zip::ZipArchive::new(file)?;
-            // ComicInfo.xml is 1 extra file
-            Ok(archive.len() != urls.len() + 1)
-        })()
-        .unwrap_or(true);
-
-        if !is_updated {
+        if is_chapter_up_to_date(&dest, urls.len()) {
             pb.finish_with_message(format!("Skipped Chapter {}", chapter.number));
             return Ok(None);
         }
@@ -460,92 +553,24 @@ pub fn download_chapter(
     let mut temp = dest.clone();
     temp.set_extension("cbz.part");
 
-    let result: Result<()> = (|| {
+    let write_cbz = || -> Result<()> {
         let file = File::create(&temp)?;
         let writer = BufWriter::new(file);
         let mut archive = zip::ZipWriter::new(writer);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-        use crate::utils::escape_xml;
-        let comic_info = format!(
-            r#"<?xml version="1.0" encoding="utf-8"?>
-<ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <Title>{}</Title>
-  <Series>{}</Series>
-  <Number>{}</Number>
-  <Summary>{}</Summary>
-  <Genre>{}</Genre>
-  <Writer>{}</Writer>
-  <AlternateSeries>{}</AlternateSeries>
-</ComicInfo>"#,
-            escape_xml(&chapter.label),
-            escape_xml(&manga.title),
-            chapter.number,
-            escape_xml(&manga.description),
-            escape_xml(&manga.genres.join(", ")),
-            escape_xml(&manga.authors.join(", ")),
-            escape_xml(&manga.alt_names.join(", ")),
-        );
+        let comic_info = generate_comic_info(manga, chapter);
         archive.start_file("ComicInfo.xml", options)?;
         archive.write_all(comic_info.as_bytes())?;
 
         for (i, img_url) in urls.iter().enumerate() {
-            let mut attempts = 0;
-            let max_attempts = 3;
-            let (data, ct) = loop {
-                attempts += 1;
-                let fetch_res = (|| -> Result<(Vec<u8>, String)> {
-                    let mut res = client
-                        .get(img_url)
-                        .header("Referer", &chapter.url)
-                        .send()?
-                        .error_for_status()?;
-
-                    let ct = res
-                        .headers()
-                        .get("Content-Type")
-                        .and_then(|h| h.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let mut data = match res.content_length() {
-                        Some(len) if len < 50 * 1024 * 1024 => Vec::with_capacity(len as usize),
-                        _ => Vec::new(),
-                    };
-                    res.copy_to(&mut data)?;
-                    Ok((data, ct))
-                })();
-
-                match fetch_res {
-                    Ok(val) => break val,
-                    Err(e) if attempts < max_attempts => {
-                        log::warn!(
-                            "Retrying image {}/{} for chapter {} after error: {}",
-                            i + 1,
-                            urls.len(),
-                            chapter.number,
-                            e
-                        );
-                        thread::sleep(Duration::from_millis(500 * attempts as u64));
-                    }
-                    Err(e) => {
-                        return Err(e).with_context(|| {
-                            format!(
-                                "Failed to download image {}/{} for chapter {} ({}) after {} attempts",
-                                i + 1,
-                                urls.len(),
-                                chapter.number,
-                                img_url,
-                                max_attempts
-                            )
-                        });
-                    }
-                }
-            };
+            let (data, ct) =
+                fetch_single_image(client, img_url, &chapter.url, 3).with_context(|| {
+                    format!("Chapter {} page {}/{}", chapter.number, i + 1, urls.len())
+                })?;
 
             let ext = image_extension(&ct, &data, img_url);
-
             archive.start_file(format!("{:03}{}", i + 1, ext), options)?;
             archive.write_all(&data)?;
 
@@ -553,9 +578,9 @@ pub fn download_chapter(
         }
         archive.finish()?;
         Ok(())
-    })();
+    };
 
-    match result {
+    match write_cbz() {
         Ok(_) => {
             std::fs::rename(&temp, &dest)?;
             pb.finish_with_message(format!("Saved Chapter {}", chapter.number));

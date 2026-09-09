@@ -45,6 +45,7 @@ pub struct Cli {
     pub port: u16,
 }
 
+/// Prompts the user to interactively select a manga from search results when multiple matches exist.
 pub fn choose_manga(results: &[Manga]) -> Result<Manga> {
     if results.is_empty() {
         bail!("No manga found");
@@ -63,6 +64,7 @@ pub fn choose_manga(results: &[Manga]) -> Result<Manga> {
     Ok(results[selection].clone())
 }
 
+/// Interactively prompts the user for a manga title or MangaKatana URL.
 pub fn prompt_manga() -> Result<String> {
     let input: String = Input::new()
         .with_prompt("Manga title or MangaKatana URL")
@@ -70,6 +72,7 @@ pub fn prompt_manga() -> Result<String> {
     Ok(input)
 }
 
+/// Interactively prompts the user for chapter selection (e.g. "all", "1-10", "1,3,5").
 pub fn prompt_chapters() -> Result<String> {
     let input: String = Input::new()
         .with_prompt("Chapters [all]")

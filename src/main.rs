@@ -76,10 +76,8 @@ fn run() -> anyhow::Result<()> {
 
     let folder_name = crate::utils::get_folder_name(&manga.title);
     let manga_output_dir = args.output.join(folder_name);
-    std::fs::create_dir_all(&manga_output_dir)?;
-
-    let max_width = crate::utils::determine_width(&chapters);
-    crate::utils::upgrade_padding(&manga.title, &chapters, &manga_output_dir, max_width);
+    let (max_width, _, _) =
+        crate::utils::scan_manga_chapters(&manga_output_dir, &manga.title, &chapters);
 
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
     use rayon::prelude::*;

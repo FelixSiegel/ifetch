@@ -10,6 +10,16 @@ const MAX_INTERVAL_HOURS: i64 = 720; // 30 days
 const SECONDS_PER_HOUR: i64 = 3600;
 const BACKOFF_MULTIPLIER: f64 = 1.5;
 
+/// Helper function to retrieve the current UTC timestamp in seconds.
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Initializes the SQLite database, sets pragmas (WAL mode, normal synchronous, busy timeout),
+/// and creates the required tables and indexes if they do not exist.
 pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(path)?;
 
@@ -43,6 +53,7 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Specifies the context under which a manga's status or chapter list was checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckTrigger {
     /// Periodic background cron check: backs off if no new chapters found
@@ -53,6 +64,10 @@ pub enum CheckTrigger {
     DownloadComplete { success: bool },
 }
 
+/// Inserts or updates manga metadata and next-check scheduling intervals in the database.
+///
+/// Uses an adaptive exponential backoff for periodic cron checks when no new chapters are found,
+/// while resetting to the base interval whenever new chapters are discovered or a download completes.
 pub fn upsert_manga(
     conn: &Connection,
     id: &str,
@@ -62,10 +77,7 @@ pub fn upsert_manga(
     local_chapters: Option<usize>,
     trigger: CheckTrigger,
 ) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = current_unix_timestamp();
 
     let (new_interval, next_check) = match trigger {
         CheckTrigger::Cron { new_chapters: true }
@@ -91,20 +103,8 @@ pub fn upsert_manga(
         }
         CheckTrigger::UserRequest {
             new_chapters: false,
-        } => {
-            let current_interval = conn
-                .query_row(
-                    "SELECT check_interval_hours FROM mangas WHERE id = ?1",
-                    params![id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap_or(*CRON_HOURS);
-            (
-                current_interval,
-                now + (current_interval * SECONDS_PER_HOUR),
-            )
         }
-        CheckTrigger::DownloadComplete { success: false } => {
+        | CheckTrigger::DownloadComplete { success: false } => {
             let current_interval = conn
                 .query_row(
                     "SELECT check_interval_hours FROM mangas WHERE id = ?1",
@@ -138,15 +138,14 @@ pub fn upsert_manga(
     Ok(())
 }
 
+/// Manga entry ready for a background check or download update.
 pub struct MangaCheck {
     pub id: String,
 }
 
+/// Queries the database for mangas that are due for a periodic check or have missing local chapters.
 pub fn get_mangas_to_check(conn: &Connection) -> Result<Vec<MangaCheck>> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = current_unix_timestamp();
 
     let mut stmt =
         conn.prepare("SELECT id FROM mangas WHERE (status != 'Completed' AND next_check <= ?1) OR (local_chapters < remote_chapters)")?;
@@ -155,6 +154,7 @@ pub fn get_mangas_to_check(conn: &Connection) -> Result<Vec<MangaCheck>> {
     mangas.collect()
 }
 
+/// Retrieves the title of a manga by its ID from the local database.
 pub fn get_manga_title(conn: &Connection, id: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare("SELECT title FROM mangas WHERE id = ?1")?;
     let mut rows = stmt.query(params![id])?;
