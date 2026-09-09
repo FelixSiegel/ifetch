@@ -50,15 +50,50 @@ pub fn build_client() -> Result<Client> {
         .context("Failed to build HTTP client")
 }
 
+pub fn is_cloudflare_or_rate_limited(status: reqwest::StatusCode, body: &str) -> bool {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    {
+        return true;
+    }
+
+    // Cloudflare challenges and bot blocks are always in the HTML head/top section.
+    // Inspect only the first 4KB to avoid scanning large HTML payloads.
+    let prefix = if body.len() > 4096 {
+        // Find safe UTF-8 boundary around 4096 bytes
+        match body.char_indices().take_while(|(i, _)| *i <= 4096).last() {
+            Some((i, c)) => &body[..i + c.len_utf8()],
+            None => body,
+        }
+    } else {
+        body
+    };
+
+    prefix.contains("<title>Just a moment...</title>")
+        || prefix.contains("cf-chl-")
+        || prefix.contains("cf-browser-verification")
+        || prefix.contains("Checking your browser")
+        || prefix.contains("Attention Required! | Cloudflare")
+        || (prefix.contains("Cloudflare") && prefix.contains("Ray ID") && !prefix.contains("var thzq"))
+}
+
 pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     let res = client
         .get(Url::parse_with_params(BASE_URL, &[("search", query)])?)
         .send()?
         .error_for_status()?;
+    let status = res.status();
     let url = res.url().clone();
     let path = url.path().trim_end_matches('/');
 
     let text = res.text()?;
+    if is_cloudflare_or_rate_limited(status, &text) {
+        bail!(
+            "MangaKatana search temporarily blocked by Cloudflare/rate limit (status: {:?})",
+            status
+        );
+    }
     let doc = Html::parse_document(&text);
 
     if MANGA_RE.is_match(path) {
@@ -145,7 +180,14 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
 pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>)> {
     let res = client.get(url).send()?.error_for_status()?;
+    let status = res.status();
     let text = res.text()?;
+    if is_cloudflare_or_rate_limited(status, &text) {
+        bail!(
+            "MangaKatana chapter list blocked by Cloudflare/rate limit (status: {:?})",
+            status
+        );
+    }
     let doc = Html::parse_document(&text);
 
     let title = doc
@@ -310,13 +352,34 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 }
 
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
+    let mut hit_rate_limit = false;
+    let mut last_status = None;
+
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
-        let res = client.get(&url).send()?;
-        if !res.status().is_success() {
+        let res = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("Failed request to {}: {}", url, e);
+                continue;
+            }
+        };
+        let status = res.status();
+        last_status = Some(status);
+
+        let text = match res.text() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if is_cloudflare_or_rate_limited(status, &text) {
+            hit_rate_limit = true;
+            break;
+        }
+
+        if !status.is_success() {
             continue;
         }
-        let text = res.text()?;
 
         if let Some(caps) = THZQ_RE.captures(&text) {
             let array_content = caps.get(1).unwrap().as_str();
@@ -332,6 +395,13 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
                 return Ok(urls);
             }
         }
+    }
+
+    if hit_rate_limit {
+        bail!(
+            "Rate limited by Cloudflare/MangaKatana (status: {:?})",
+            last_status
+        );
     }
     bail!("Chapter contains no downloadable images")
 }

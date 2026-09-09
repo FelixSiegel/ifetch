@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod downloader;
 pub mod helpers;
+pub mod rate_limit;
 pub mod routes;
 pub mod state;
 
@@ -12,6 +13,7 @@ use crate::{
         cache::ServerCache,
         downloader::{DownloadPool, queue_background_download},
         helpers::lock_mutex,
+        rate_limit::AdaptiveRateLimiter,
         routes::handle_route,
         state::AppState,
     },
@@ -87,6 +89,7 @@ pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: 
         db,
         download_pool: Arc::new(DownloadPool::new(threads)),
         cache: Arc::new(ServerCache::new(64 * 1024 * 1024)), // 64 MB LRU image cache
+        rate_limiter: Arc::new(AdaptiveRateLimiter::new()),
     });
 
     let state_cron = Arc::clone(&state);

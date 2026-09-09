@@ -34,12 +34,18 @@ pub enum NotificationType<'a> {
         manga_title: &'a str,
         manga_url: &'a str,
         description: &'a str,
-        chapter_count: usize,
+        total_chapters: usize,
+        existing_chapters: usize,
+        missing_chapters: usize,
     },
-    Success {
+    Complete {
         manga_title: &'a str,
         manga_url: &'a str,
-        chapter_count: usize,
+        total_chapters: usize,
+        downloaded_now: usize,
+        failed_now: usize,
+        total_available: usize,
+        first_error: Option<&'a str>,
     },
     Error {
         manga_title: &'a str,
@@ -63,7 +69,9 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
             manga_title,
             manga_url,
             description,
-            chapter_count,
+            total_chapters,
+            existing_chapters,
+            missing_chapters,
         } => Embed {
             author,
             title: manga_title,
@@ -77,35 +85,78 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
                     inline: true,
                 },
                 Field {
-                    name: "Chapters",
-                    value: chapter_count.to_string(),
+                    name: "To Download",
+                    value: format!("{} chapters", missing_chapters),
+                    inline: true,
+                },
+                Field {
+                    name: "Progress",
+                    value: format!("{}/{} downloaded", existing_chapters, total_chapters),
                     inline: true,
                 },
             ],
         },
-        NotificationType::Success {
+        NotificationType::Complete {
             manga_title,
             manga_url,
-            chapter_count,
-        } => Embed {
-            author,
-            title: manga_title,
-            url: Some(manga_url),
-            description: None,
-            color: 0x2ecc71, // Green
-            fields: vec![
+            total_chapters,
+            downloaded_now,
+            failed_now,
+            total_available,
+            first_error,
+        } => {
+            let (status_text, color) = if failed_now == 0 {
+                ("Download Completed", 0x2ecc71) // Green
+            } else if downloaded_now > 0 {
+                ("Partially Completed", 0xf39c12) // Orange / Amber
+            } else {
+                ("Download Failed", 0xe74c3c) // Red
+            };
+
+            let mut fields = vec![
                 Field {
                     name: "Status",
-                    value: "Download Completed".to_string(),
+                    value: status_text.to_string(),
                     inline: true,
                 },
                 Field {
-                    name: "Chapters",
-                    value: chapter_count.to_string(),
+                    name: "Downloaded Now",
+                    value: format!("{} chapters", downloaded_now),
                     inline: true,
                 },
-            ],
-        },
+            ];
+
+            if failed_now > 0 {
+                fields.push(Field {
+                    name: "Failed",
+                    value: format!("{} chapters", failed_now),
+                    inline: true,
+                });
+            }
+
+            fields.push(Field {
+                name: "Progress",
+                value: format!("{}/{} available", total_available, total_chapters),
+                inline: true,
+            });
+
+            if let Some(err) = first_error {
+                fields.push(Field {
+                    name: "Error Details",
+                    value: crate::utils::truncate_str(err, 250).to_string(),
+                    inline: false,
+                });
+            }
+
+            Embed {
+                author,
+                title: manga_title,
+                url: Some(manga_url),
+                description: None,
+                color,
+                fields,
+            }
+        }
         NotificationType::Error {
             manga_title,
             manga_url,
@@ -118,7 +169,7 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
             color: 0xe74c3c, // Red
             fields: vec![Field {
                 name: "Status",
-                value: "Download Failed".to_string(),
+                value: "Failed to Fetch Manga".to_string(),
                 inline: true,
             }],
         },

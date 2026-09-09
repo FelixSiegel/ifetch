@@ -202,6 +202,7 @@ pub fn queue_background_download(
             return;
         }
 
+        let existing_count = chapters.len().saturating_sub(missing.len());
         let desc = truncate_str(&manga.description, 200);
         send_webhook(
             &state.client,
@@ -209,7 +210,9 @@ pub fn queue_background_download(
                 manga_title: &manga.title,
                 manga_url: &url,
                 description: &desc,
-                chapter_count: missing.len(),
+                total_chapters: chapters.len(),
+                existing_chapters: existing_count,
+                missing_chapters: missing.len(),
             },
         );
 
@@ -238,16 +241,40 @@ pub fn queue_background_download(
             let state = Arc::clone(&state);
 
             pool.spawn(move || {
-                let pb = indicatif::ProgressBar::hidden();
-                let res = core::download_chapter(
-                    &state.client,
-                    &tracker.manga,
-                    &chapter,
-                    &tracker.output_dir,
-                    tracker.max_width,
-                    false,
-                    &pb,
-                );
+                let mut attempts = 0;
+                let max_attempts = 3;
+
+                let res = loop {
+                    attempts += 1;
+                    state.rate_limiter.wait_for_chapter_permit();
+
+                    let pb = indicatif::ProgressBar::hidden();
+                    let dl_res = core::download_chapter(
+                        &state.client,
+                        &tracker.manga,
+                        &chapter,
+                        &tracker.output_dir,
+                        tracker.max_width,
+                        false,
+                        &pb,
+                    );
+
+                    match dl_res {
+                        Ok(val) => {
+                            state.rate_limiter.on_chapter_success();
+                            break Ok(val);
+                        }
+                        Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
+                            let cooldown = state.rate_limiter.on_rate_limit_hit(&e.to_string());
+                            warn!(
+                                "Rate limit encountered on chapter {} for {}. Pausing worker for {:?} before retry (attempt {}/{})",
+                                chapter.number, tracker.manga.title, cooldown, attempts, max_attempts
+                            );
+                            std::thread::sleep(cooldown);
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
 
                 match res {
                     Ok(Some(_)) | Ok(None) => {
@@ -259,7 +286,7 @@ pub fn queue_background_download(
                             chapter.number, tracker.manga.title, e
                         );
                         tracker.error_count.fetch_add(1, Ordering::Relaxed);
-                        let mut fe = tracker.first_error.lock().unwrap();
+                        let mut fe = lock_mutex(&tracker.first_error);
                         if fe.is_none() {
                             *fe = Some(e.to_string());
                         }
@@ -272,6 +299,15 @@ pub fn queue_background_download(
             });
         }
     });
+}
+
+fn is_rate_limit_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("Rate limited")
+        || msg.contains("429")
+        || msg.contains("403")
+        || msg.contains("503")
+        || msg.contains("Cloudflare")
 }
 
 fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) {
@@ -307,42 +343,45 @@ fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) 
         },
     );
 
-    if total_errors > 0 && total_successes == 0 {
-        let err_msg = tracker
-            .first_error
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(|| "All chapter downloads failed".to_string());
-        error!("Background download for {} failed: {}", tracker.id, err_msg);
-        send_webhook(
-            &state.client,
-            NotificationType::Error {
-                manga_title: &tracker.manga.title,
-                manga_url: &tracker.url,
-                error_msg: &err_msg,
-            },
+    let first_err_guard = lock_mutex(&tracker.first_error);
+    let first_err = first_err_guard.as_deref();
+
+    if total_errors > 0 {
+        warn!(
+            "Background download for {} finished with errors ({} succeeded, {} failed out of {} missing). First error: {:?}",
+            tracker.id, total_successes, total_errors, tracker.missing_count, first_err
         );
     } else {
-        if total_errors > 0 {
-            warn!(
-                "Background download for {} partially succeeded ({} succeeded, {} failed out of {}).",
-                tracker.id, total_successes, total_errors, tracker.missing_count
-            );
-        }
-        send_webhook(
-            &state.client,
-            NotificationType::Success {
-                manga_title: &tracker.manga.title,
-                manga_url: &tracker.url,
-                chapter_count: total_successes,
-            },
-        );
         info!(
-            "Background download for {} completed ({} / {} total chapters).",
+            "Background download for {} completed successfully ({} / {} total chapters).",
             tracker.id, local_count, tracker.total_chapters
         );
     }
+
+    let stats = state.rate_limiter.get_stats();
+    info!(
+        "Limiter stats: total dl={}, blocks hit={}, min burst before block={:?}, max burst={}, current burst={}, current delay={}ms, cooldown={}s",
+        stats.total_chapters,
+        stats.total_blocks_hit,
+        stats.min_burst_before_block,
+        stats.max_burst_achieved,
+        stats.current_burst_count,
+        stats.current_delay_ms,
+        stats.current_cooldown_secs,
+    );
+
+    send_webhook(
+        &state.client,
+        NotificationType::Complete {
+            manga_title: &tracker.manga.title,
+            manga_url: &tracker.url,
+            total_chapters: tracker.total_chapters,
+            downloaded_now: total_successes,
+            failed_now: total_errors,
+            total_available: local_count,
+            first_error: first_err,
+        },
+    );
 
     let mut active = lock_mutex(&state.active_downloads);
     active.remove(&tracker.id);

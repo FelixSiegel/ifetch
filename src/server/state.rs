@@ -1,4 +1,6 @@
-use crate::server::{cache::ServerCache, downloader::DownloadPool};
+use crate::server::{
+    cache::ServerCache, downloader::DownloadPool, rate_limit::AdaptiveRateLimiter,
+};
 use reqwest::blocking::Client;
 use std::{
     collections::HashSet,
@@ -13,4 +15,5 @@ pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub download_pool: Arc<DownloadPool>,
     pub cache: Arc<ServerCache>,
+    pub rate_limiter: Arc<AdaptiveRateLimiter>,
 }
