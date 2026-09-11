@@ -95,7 +95,6 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
 
     let folder = get_folder_name(&manga.title);
     let manga_dir = state.output_dir.join(&folder);
-    let _ = std::fs::create_dir_all(&manga_dir);
 
     {
         let mut dirs = lock_mutex(&state.cache.manga_dirs);

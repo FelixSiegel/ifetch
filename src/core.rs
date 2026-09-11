@@ -1,18 +1,25 @@
-use crate::models::{Chapter, Manga};
-use crate::utils::{chapter_filename, image_extension};
+use crate::{
+    models::{Chapter, Manga},
+    rate_limit::{RateLimitError, is_rate_limit_error},
+    utils::{chapter_filename, image_extension},
+};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderMap, HeaderValue, USER_AGENT},
+};
 use rust_decimal::Decimal;
 use scraper::{Html, Selector};
-use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-use std::thread;
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    thread,
+    time::Duration,
+};
 use url::Url;
 use zip::write::SimpleFileOptions;
 
@@ -101,10 +108,11 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
     let text = res.text()?;
     if is_cloudflare_or_rate_limited(status, &text) {
-        bail!(
-            "MangaKatana search temporarily blocked by Cloudflare/rate limit (status: {:?})",
-            status
-        );
+        return Err(RateLimitError::new(
+            Some(status),
+            "MangaKatana search temporarily blocked by Cloudflare or rate limit",
+        )
+        .into());
     }
     let doc = Html::parse_document(&text);
 
@@ -196,10 +204,11 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let status = res.status();
     let text = res.text()?;
     if is_cloudflare_or_rate_limited(status, &text) {
-        bail!(
-            "MangaKatana chapter list blocked by Cloudflare/rate limit (status: {:?})",
-            status
-        );
+        return Err(RateLimitError::new(
+            Some(status),
+            "MangaKatana chapter list blocked by Cloudflare or rate limit",
+        )
+        .into());
     }
     let doc = Html::parse_document(&text);
 
@@ -414,10 +423,11 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
     }
 
     if hit_rate_limit {
-        bail!(
-            "Rate limited by Cloudflare/MangaKatana (status: {:?})",
-            last_status
-        );
+        return Err(RateLimitError::new(
+            last_status,
+            "Cloudflare challenge or rate limit detected while fetching chapter images",
+        )
+        .into());
     }
     bail!("Chapter contains no downloadable images")
 }
@@ -467,11 +477,35 @@ pub fn fetch_single_image(
     loop {
         attempts += 1;
         let fetch_res = (|| -> Result<(Vec<u8>, String)> {
-            let mut res = client
-                .get(img_url)
-                .header("Referer", referer)
-                .send()?
-                .error_for_status()?;
+            let mut res = client.get(img_url).header("Referer", referer).send()?;
+
+            let status = res.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = res
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs);
+
+                return Err(RateLimitError::new(
+                    Some(status),
+                    "Image CDN returned HTTP 429 Too Many Requests",
+                )
+                .with_retry_after(retry_after)
+                .into());
+            }
+
+            if !status.is_success() {
+                let text = res.text().unwrap_or_default();
+                if is_cloudflare_or_rate_limited(status, &text) {
+                    return Err(anyhow::Error::from(RateLimitError::new(
+                        Some(status),
+                        "Image CDN returned Cloudflare challenge page",
+                    )));
+                }
+                bail!("HTTP error {} downloading image from {}", status, img_url);
+            }
 
             let ct = res
                 .headers()
@@ -490,6 +524,9 @@ pub fn fetch_single_image(
 
         match fetch_res {
             Ok(val) => return Ok(val),
+            Err(e) if is_rate_limit_error(&e) => {
+                return Err(e);
+            }
             Err(e) if attempts < max_attempts => {
                 log::warn!(
                     "Retrying image ({}) after error: {} (attempt {}/{})",
@@ -523,6 +560,7 @@ pub fn download_chapter(
     verify: bool,
     pb: &indicatif::ProgressBar,
 ) -> Result<Option<PathBuf>> {
+    std::fs::create_dir_all(output_dir)?;
     let filename = chapter_filename(&manga.title, &chapter.number.to_string(), width);
     let dest = output_dir.join(&filename);
 
@@ -588,7 +626,7 @@ pub fn download_chapter(
         }
         Err(e) => {
             let _ = std::fs::remove_file(&temp);
-            pb.finish_with_message(format!("Error Chapter {}", chapter.number));
+            pb.abandon_with_message(format!("Error Chapter {}", chapter.number));
             Err(e)
         }
     }

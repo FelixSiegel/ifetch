@@ -1,7 +1,7 @@
 pub mod cache;
 pub mod downloader;
 pub mod helpers;
-pub mod rate_limit;
+pub use crate::rate_limit;
 pub mod routes;
 pub mod state;
 

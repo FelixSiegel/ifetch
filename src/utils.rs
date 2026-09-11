@@ -205,7 +205,7 @@ pub fn upgrade_padding(
     dir: &std::path::Path,
     target_width: usize,
 ) {
-    if target_width <= 3 || chapters.is_empty() {
+    if target_width <= 3 || chapters.is_empty() || !dir.exists() {
         return;
     }
 
@@ -255,10 +255,11 @@ pub fn scan_manga_chapters(
 
     let mut existing = Vec::new();
     let mut missing = Vec::new();
+    let dir_exists = manga_dir.exists();
 
     for chapter in chapters {
         let filename = chapter_filename(title, &chapter.number.to_string(), width);
-        if manga_dir.join(&filename).exists() {
+        if dir_exists && manga_dir.join(&filename).exists() {
             existing.push(chapter.clone());
         } else {
             missing.push(chapter.clone());

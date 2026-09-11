@@ -125,9 +125,7 @@ ifetch --server --port 8080 --output ./downloads --config ./config
 
 ## Mihon / Tachiyomi Extension
 
-If you run iFetch in server mode, you can connect your mobile reader app using the official extension:
-
-👉 **[ifetch-extension](https://github.com/FelixSiegel/ifetch-extension)**
+If you run iFetch in server mode, you can connect your mobile reader app using the official extension: **[ifetch-extension](https://github.com/FelixSiegel/ifetch-extension)**
 
 Once installed, point the extension's address setting to your iFetch server URL (e.g., `http://your-server-ip:8080`). You can browse, read cached chapters, and trigger background downloads directly from your mobile device.
 

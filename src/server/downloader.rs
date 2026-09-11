@@ -3,6 +3,7 @@ use crate::{
     db::{CheckTrigger, upsert_manga},
     discord::{NotificationType, send_webhook},
     models::{Chapter, Manga},
+    rate_limit::{extract_retry_after, is_rate_limit_error},
     server::{helpers::lock_mutex, state::AppState},
     utils::{get_folder_name, scan_manga_chapters, truncate_str},
 };
@@ -169,14 +170,6 @@ pub fn queue_background_download(
         let url = format!("https://mangakatana.com/manga/{}", id);
         let folder_name = get_folder_name(&manga.title);
         let manga_output_dir = state.output_dir.join(&folder_name);
-        if let Err(e) = std::fs::create_dir_all(&manga_output_dir) {
-            error!(
-                "Failed to create directory {}: {}",
-                manga_output_dir.display(),
-                e
-            );
-            return;
-        }
 
         if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
             dirs.insert(id.clone(), (manga.title.clone(), manga_output_dir.clone()));
@@ -263,7 +256,10 @@ pub fn queue_background_download(
                             break Ok(val);
                         }
                         Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
-                            let cooldown = state.rate_limiter.on_rate_limit_hit(&e.to_string());
+                            let retry_after = extract_retry_after(&e);
+                            let cooldown = state
+                                .rate_limiter
+                                .on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
                             warn!(
                                 "Rate limit encountered on chapter {} for {}. Pausing worker for {:?} before retry (attempt {}/{})",
                                 chapter.number, tracker.manga.title, cooldown, attempts, max_attempts
@@ -297,16 +293,6 @@ pub fn queue_background_download(
             });
         }
     });
-}
-
-/// Helper function to check if an error corresponds to rate limiting or Cloudflare blocking.
-fn is_rate_limit_error(e: &anyhow::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("Rate limited")
-        || msg.contains("429")
-        || msg.contains("403")
-        || msg.contains("503")
-        || msg.contains("Cloudflare")
 }
 
 /// Finalizer invoked when the last chapter task for a manga finishes downloading.
@@ -352,12 +338,14 @@ fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) 
 
     let stats = state.rate_limiter.get_stats();
     info!(
-        "Limiter stats: total dl={}, blocks hit={}, min burst before block={:?}, max burst={}, current burst={}, current delay={}ms, cooldown={}s",
-        stats.total_chapters,
+        "Limiter stats: total dl={}, blocks hit={}, min burst={:?}, min total={:?}, max burst={}, permits since reset={} (burst: {}), current delay={}ms, cooldown={}s",
+        stats.total_successful_chapters,
         stats.total_blocks_hit,
         stats.min_burst_before_block,
+        stats.min_total_before_block,
         stats.max_burst_achieved,
-        stats.current_burst_count,
+        stats.total_permits_since_reset,
+        stats.burst_permits_since_reset,
         stats.current_delay_ms,
         stats.current_cooldown_secs,
     );

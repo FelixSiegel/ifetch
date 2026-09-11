@@ -4,14 +4,16 @@ mod core;
 mod db;
 mod discord;
 mod models;
+pub mod rate_limit;
 mod server;
 mod utils;
 
 use crate::cli::Cli;
+use crate::rate_limit::{AdaptiveRateLimiter, is_rate_limit_error};
 use crate::utils::truncate_str;
 use clap::Parser;
 use std::process;
-use std::time::Duration;
+use std::sync::Arc;
 
 fn main() {
     if let Err(e) = run() {
@@ -92,6 +94,7 @@ fn run() -> anyhow::Result<()> {
         .unwrap()
         .progress_chars("=>-");
 
+    let rate_limiter = Arc::new(AdaptiveRateLimiter::new());
     let current_index = std::sync::atomic::AtomicUsize::new(0);
     let chosen_len = chosen.len();
 
@@ -109,20 +112,53 @@ fn run() -> anyhow::Result<()> {
                 let pb = m.add(ProgressBar::new(0));
                 pb.set_style(style.clone());
 
-                let res = core::download_chapter(
-                    &client,
-                    &manga,
-                    chapter,
-                    &manga_output_dir,
-                    max_width,
-                    args.verify,
-                    &pb,
-                );
+                let mut attempts = 0;
+                let max_attempts = 3;
 
-                // short sleep after each downloaded chapter
-                if let Ok(Some(_)) = res {
-                    std::thread::sleep(Duration::from_millis(500));
-                    local_saved += 1;
+                let res = loop {
+                    attempts += 1;
+                    rate_limiter.wait_for_chapter_permit();
+
+                    let dl_res = core::download_chapter(
+                        &client,
+                        &manga,
+                        chapter,
+                        &manga_output_dir,
+                        max_width,
+                        args.verify,
+                        &pb,
+                    );
+
+                    match dl_res {
+                        Ok(val) => {
+                            rate_limiter.on_chapter_success();
+                            break Ok(val);
+                        }
+                        Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
+                            let retry_after = rate_limit::extract_retry_after(&e);
+                            let cooldown = rate_limiter
+                                .on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
+                            pb.set_message(format!(
+                                "Rate limited on Ch {}. Pausing {:?} (attempt {}/{})",
+                                chapter.number, cooldown, attempts, max_attempts
+                            ));
+                            std::thread::sleep(cooldown);
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
+
+                match res {
+                    Ok(Some(_)) => {
+                        local_saved += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = m.println(format!(
+                            "Failed to download chapter {}: {:#}",
+                            chapter.number, e
+                        ));
+                    }
                 }
             }
             local_saved
