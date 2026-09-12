@@ -1,7 +1,6 @@
 pub mod cache;
 pub mod downloader;
 pub mod helpers;
-pub use crate::rate_limit;
 pub mod routes;
 pub mod state;
 
@@ -9,11 +8,11 @@ use crate::{
     config::CRON_HOURS,
     core::{self, manga_chapters},
     db::{CheckTrigger, get_mangas_to_check, init_db, upsert_manga},
+    rate_limit::AdaptiveRateLimiter,
     server::{
         cache::ServerCache,
         downloader::{DownloadPool, queue_background_download},
         helpers::lock_mutex,
-        rate_limit::AdaptiveRateLimiter,
         routes::handle_route,
         state::AppState,
     },

@@ -110,6 +110,24 @@ pub struct MangaDownloadTracker {
     chapters: Vec<Chapter>,
 }
 
+/// RAII guard ensuring chapter completion and error accounting even if a worker panics.
+struct ChapterGuard<'a> {
+    tracker: &'a MangaDownloadTracker,
+    state: &'a AppState,
+    completed: bool,
+}
+
+impl<'a> Drop for ChapterGuard<'a> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.tracker.error_count.fetch_add(1, Ordering::Relaxed);
+            if self.tracker.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                on_manga_download_complete(self.tracker, self.state);
+            }
+        }
+    }
+}
+
 /// Initiates or queues a background download of all missing chapters for the given manga ID.
 ///
 /// Prevents concurrent duplicate downloads for the same manga ID.
@@ -171,9 +189,8 @@ pub fn queue_background_download(
         let folder_name = get_folder_name(&manga.title);
         let manga_output_dir = state.output_dir.join(&folder_name);
 
-        if let Ok(mut dirs) = state.cache.manga_dirs.lock() {
-            dirs.insert(id.clone(), (manga.title.clone(), manga_output_dir.clone()));
-        }
+        lock_mutex(&state.cache.manga_dirs)
+            .insert(id.clone(), (manga.title.clone(), manga_output_dir.clone()));
 
         let (max_width, existing, missing) =
             scan_manga_chapters(&manga_output_dir, &manga.title, &chapters);
@@ -232,6 +249,12 @@ pub fn queue_background_download(
             let state = Arc::clone(&state);
 
             pool.spawn(move || {
+                let mut guard = ChapterGuard {
+                    tracker: &tracker,
+                    state: &state,
+                    completed: false,
+                };
+
                 let mut attempts = 0;
                 let max_attempts = 3;
 
@@ -287,6 +310,7 @@ pub fn queue_background_download(
                     }
                 }
 
+                guard.completed = true;
                 if tracker.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
                     on_manga_download_complete(&tracker, &state);
                 }
@@ -297,9 +321,8 @@ pub fn queue_background_download(
 
 /// Finalizer invoked when the last chapter task for a manga finishes downloading.
 fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) {
-    if let Ok(mut pages) = state.cache.chapter_pages.lock() {
-        pages.retain(|k, _| !k.starts_with(&format!("{}::", tracker.id)));
-    }
+    lock_mutex(&state.cache.chapter_pages)
+        .retain(|k, _| !k.starts_with(&format!("{}::", tracker.id)));
 
     let total_successes = tracker.success_count.load(Ordering::Relaxed);
     let total_errors = tracker.error_count.load(Ordering::Relaxed);

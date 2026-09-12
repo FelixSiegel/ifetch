@@ -78,13 +78,13 @@ pub fn upsert_manga(
     trigger: CheckTrigger,
 ) -> Result<()> {
     let now = current_unix_timestamp();
+    let base_interval = (*CRON_HOURS).max(1);
 
     let (new_interval, next_check) = match trigger {
         CheckTrigger::Cron { new_chapters: true }
         | CheckTrigger::UserRequest { new_chapters: true }
         | CheckTrigger::DownloadComplete { success: true } => {
-            let interval = *CRON_HOURS;
-            (interval, now + (interval * SECONDS_PER_HOUR))
+            (base_interval, now + (base_interval * SECONDS_PER_HOUR))
         }
         CheckTrigger::Cron {
             new_chapters: false,
@@ -95,10 +95,11 @@ pub fn upsert_manga(
                     params![id],
                     |row| row.get::<_, i64>(0),
                 )
-                .unwrap_or(*CRON_HOURS);
+                .unwrap_or(base_interval);
 
+            let max_interval = MAX_INTERVAL_HOURS.max(base_interval);
             let backed_off = ((current_interval as f64 * BACKOFF_MULTIPLIER) as i64)
-                .clamp(*CRON_HOURS, MAX_INTERVAL_HOURS);
+                .clamp(base_interval, max_interval);
             (backed_off, now + (backed_off * SECONDS_PER_HOUR))
         }
         CheckTrigger::UserRequest {
@@ -111,7 +112,7 @@ pub fn upsert_manga(
                     params![id],
                     |row| row.get::<_, i64>(0),
                 )
-                .unwrap_or(*CRON_HOURS);
+                .unwrap_or(base_interval);
             (
                 current_interval,
                 now + (current_interval * SECONDS_PER_HOUR),

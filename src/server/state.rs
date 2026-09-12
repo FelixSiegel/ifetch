@@ -1,5 +1,6 @@
-use crate::server::{
-    cache::ServerCache, downloader::DownloadPool, rate_limit::AdaptiveRateLimiter,
+use crate::{
+    rate_limit::AdaptiveRateLimiter,
+    server::{cache::ServerCache, downloader::DownloadPool},
 };
 use reqwest::blocking::Client;
 use std::{

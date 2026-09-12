@@ -29,9 +29,9 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
     let path = parsed.path().trim_end_matches('/');
 
     let path = if let Some(caps) = SERIES_CHAPTER_RE.captures(path) {
-        caps.get(1).unwrap().as_str()
-    } else if path.ends_with("/download") {
-        path.strip_suffix("/download").unwrap()
+        caps.get(1).map_or(path, |m| m.as_str())
+    } else if let Some(stripped) = path.strip_suffix("/download") {
+        stripped
     } else {
         path
     };

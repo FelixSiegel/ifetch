@@ -52,14 +52,18 @@ fn run() -> anyhow::Result<()> {
     let mut genres_str = manga.genres.join(", ");
     genres_str = truncate_str(&genres_str, 80);
 
+    let chapter_summary = match (chapters.first(), chapters.last()) {
+        (Some(first), Some(last)) => format!(" ({} - {})", first.number, last.number),
+        _ => String::new(),
+    };
+
     println!(
-        "\n{}\n{}\n{}\n\n{} chapters ({} - {})",
-        style(manga.title.clone()).cyan().bold(),
+        "\n{}\n{}\n{}\n\n{} chapters{}",
+        style(&manga.title).cyan().bold(),
         style(genres_str).yellow(),
-        style(manga.description.clone()).dim(),
+        style(&manga.description).dim(),
         style(chapters.len()).green(),
-        chapters.first().unwrap().number,
-        chapters.last().unwrap().number
+        chapter_summary
     );
 
     if args.list {

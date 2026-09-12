@@ -19,7 +19,7 @@ You can run it as an interactive CLI tool or as a lightweight HTTP server. When 
 ## Features
 
 - **CBZ Packaging & Metadata**: Packages chapters into `.cbz` files containing full `ComicInfo.xml` metadata (title, series, number, volume, synopsis, genre, author).
-- **Clean Folder Structure**: Downloads each manga into it's own folder and automatically calculates and maintains uniform zero-padding across chapter archives (e.g. `Chapter 001.cbz` vs `Chapter 100.cbz`).
+- **Clean Folder Structure**: Downloads each manga into its own folder and automatically calculates and maintains uniform zero-padding across chapter archives (e.g. `Chapter 001.cbz` vs `Chapter 100.cbz`).
 - **Interactive CLI**: Search titles interactively or pass URLs directly, with support for flexible chapter selectors (`all`, `1-10`, `1,3,5.5`).
 - **Self-Hosted Reader Server**: Exposes a REST API for searching, browsing, chapter reading, and on-demand background downloading.
 - **Mihon / Tachiyomi Extension**: Seamlessly integrate your self-hosted library into Mihon with the [ifetch-extension](https://github.com/FelixSiegel/ifetch-extension).
@@ -119,7 +119,7 @@ ifetch --server --port 8080 --output ./downloads --config ./config
 | `IFETCH_OUTPUT`       | `-o`, `--output`  | `downloads` | Directory for manga archives                                    |
 | `IFETCH_CONFIG`       | `-C`, `--config`  | `config`    | Directory for SQLite DB and config                              |
 | `IFETCH_THREADS`      | `-t`, `--threads` | `1`         | Concurrent chapter download threads                             |
-| `IFETCH_VERIFY`       | `--verify`        | `false`     | Check chapters for updates an re-download if necessary          |
+| `IFETCH_VERIFY`       | `--verify`        | `false`     | Check chapters for updates and re-download if necessary         |
 | `IFETCH_CRON_HOURS`   | —                 | `12`        | Interval in hours for automatic chapter checks (`0` to disable) |
 | `DISCORD_WEBHOOK_URL` | —                 | `None`      | Optional webhook URL for Discord alerts                         |
 

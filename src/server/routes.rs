@@ -22,19 +22,18 @@ pub fn handle_route(
     query: &HashMap<String, String>,
     state: &Arc<AppState>,
 ) -> Result<Response<Cursor<Vec<u8>>>> {
+    let path = path.strip_suffix('/').unwrap_or(path);
+
     if path == "/api/search" {
         return search(query, state);
     }
-    if let Some(id) = path
-        .strip_prefix("/api/manga/")
-        .filter(|&p| !p.contains('/'))
-    {
-        return manga_details(id, state);
-    }
-    if let Some(rest) = path.strip_prefix("/api/manga/")
-        && let Some(id) = rest.strip_suffix("/chapters")
-    {
-        return manga_chapters_route(id, state);
+    if let Some(rest) = path.strip_prefix("/api/manga/") {
+        if let Some(id) = rest.strip_suffix("/chapters") {
+            return manga_chapters_route(id, state);
+        }
+        if !rest.contains('/') && !rest.is_empty() {
+            return manga_details(rest, state);
+        }
     }
     if let Some(rest) = path.strip_prefix("/api/chapter/")
         && let Some(chap_id) = rest.strip_suffix("/pages")
@@ -135,8 +134,7 @@ fn chapter_pages(chap_id: &str, state: &AppState) -> Result<Response<Cursor<Vec<
         return Ok(bad_request("Invalid chapter ID"));
     };
 
-    let pages_map = lock_mutex(&state.cache.chapter_pages);
-    if let Some(pages) = pages_map.get(chap_id).cloned() {
+    if let Some(pages) = lock_mutex(&state.cache.chapter_pages).get(chap_id).cloned() {
         return json_response(&pages);
     }
 
@@ -163,8 +161,7 @@ fn chapter_pages(chap_id: &str, state: &AppState) -> Result<Response<Cursor<Vec<
 
     pages.sort();
 
-    let mut pages_map = lock_mutex(&state.cache.chapter_pages);
-    pages_map.insert(chap_id.to_string(), pages.clone());
+    lock_mutex(&state.cache.chapter_pages).insert(chap_id.to_string(), pages.clone());
 
     json_response(&pages)
 }
@@ -185,8 +182,7 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
     };
 
     let cache_key = format!("{}/{}", chap_id, filename);
-    let mut img_cache = lock_mutex(&state.cache.image_cache);
-    if let Some(cached_data) = img_cache.get(&cache_key) {
+    if let Some(cached_data) = lock_mutex(&state.cache.image_cache).get(&cache_key) {
         let ct = get_mime_type(filename);
         return Ok(image_response(&cached_data, ct));
     }
@@ -214,8 +210,7 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
     img_file.read_to_end(&mut buf)?;
 
     let arc_data: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
-    let mut img_cache = lock_mutex(&state.cache.image_cache);
-    img_cache.insert(cache_key, Arc::clone(&arc_data));
+    lock_mutex(&state.cache.image_cache).insert(cache_key, Arc::clone(&arc_data));
 
     let ct = get_mime_type(filename);
     Ok(image_response(&arc_data, ct))
@@ -223,27 +218,20 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
 
 /// Resolves a manga ID to its title and output directory, consulting the cache and database.
 fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
-    let dirs = lock_mutex(&state.cache.manga_dirs);
-    if let Some(entry) = dirs.get(id).cloned() {
+    if let Some(entry) = lock_mutex(&state.cache.manga_dirs).get(id).cloned() {
         return Ok(entry);
     }
 
-    let manga_title = {
+    let maybe_title = {
         let conn = lock_mutex(&state.db);
         get_manga_title(&conn, id).unwrap_or(None)
     };
 
-    if let Some(title) = manga_title {
-        let folder = get_folder_name(&title);
-        let dir = state.output_dir.join(folder);
-        let mut dirs = lock_mutex(&state.cache.manga_dirs);
-        dirs.insert(id.to_string(), (title.clone(), dir.clone()));
-        Ok((title, dir))
+    let title = if let Some(title) = maybe_title {
+        title
     } else {
         let url = format!("https://mangakatana.com/manga/{}", id);
         let (manga, chapters) = manga_chapters(&state.client, &url)?;
-        let folder = get_folder_name(&manga.title);
-        let manga_dir = state.output_dir.join(&folder);
         let _ = upsert_manga(
             &lock_mutex(&state.db),
             id,
@@ -255,8 +243,11 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
                 new_chapters: false,
             },
         );
-        let mut dirs = lock_mutex(&state.cache.manga_dirs);
-        dirs.insert(id.to_string(), (manga.title.clone(), manga_dir.clone()));
-        Ok((manga.title, manga_dir))
-    }
+        manga.title
+    };
+
+    let folder = get_folder_name(&title);
+    let dir = state.output_dir.join(folder);
+    lock_mutex(&state.cache.manga_dirs).insert(id.to_string(), (title.clone(), dir.clone()));
+    Ok((title, dir))
 }

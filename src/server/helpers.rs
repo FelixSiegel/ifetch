@@ -11,7 +11,7 @@ pub fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Validates that a path or URL segment is non-empty and contains no directory traversal tokens.
 pub fn is_valid_segment(s: &str) -> bool {
-    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
+    !s.is_empty() && s != "." && !s.contains('/') && !s.contains('\\') && !s.contains("..")
 }
 
 /// Splits and validates a compound chapter ID into `(manga_id, chapter_number)`.

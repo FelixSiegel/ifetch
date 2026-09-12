@@ -156,8 +156,8 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     for item in doc.select(&ITEM_SEL) {
         if let Some(anchor) = item.select(&TITLE_SEL).next()
             && let Some(href) = anchor.value().attr("href")
+            && let Ok(joined) = base_url_parsed.join(href)
         {
-            let joined = base_url_parsed.join(href)?;
             let p = joined.path().trim_end_matches('/');
             if MANGA_RE.is_match(p) && !seen.contains(joined.as_str()) {
                 seen.insert(joined.to_string());
@@ -212,18 +212,20 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     }
     let doc = Html::parse_document(&text);
 
+    let parsed_url = Url::parse(url)?;
+    let manga_path = parsed_url.path().trim_end_matches('/');
+    let id = manga_path.split('/').next_back().unwrap_or("").to_string();
+
     let title = doc
         .select(&H1_SEL)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
         .unwrap_or_else(|| {
-            let parsed = Url::parse(url).unwrap();
-            parsed
-                .path()
-                .split('/')
-                .next_back()
-                .unwrap_or("manga")
-                .to_string()
+            if id.is_empty() {
+                "manga".to_string()
+            } else {
+                id.clone()
+            }
         });
 
     let description = doc
@@ -265,15 +267,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
         .select(&STATUS_SEL)
         .next()
         .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
-        .unwrap_or("".to_string());
-
-    let id = Url::parse(url)?
-        .path()
-        .trim_end_matches('/')
-        .split('/')
-        .next_back()
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or_default();
 
     let manga = Manga {
         id,
@@ -289,16 +283,18 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
 
     let mut chapters = Vec::new();
     let base_url_parsed = Url::parse(BASE_URL)?;
-    let manga_path = Url::parse(url)?.path().trim_end_matches('/').to_string();
 
     for anchor in doc.select(&ANCHOR_SEL) {
-        if let Some(href) = anchor.value().attr("href") {
-            let joined = base_url_parsed.join(href)?;
+        if let Some(href) = anchor.value().attr("href")
+            && let Ok(joined) = base_url_parsed.join(href)
+        {
             let p = joined.path().trim_end_matches('/');
             if let Some(caps) = CHAPTER_RE.captures(p)
-                && caps.get(1).unwrap().as_str().ends_with(&manga_path)
+                && caps
+                    .get(1)
+                    .is_some_and(|m| m.as_str().ends_with(manga_path))
             {
-                let num_str = caps.get(2).unwrap().as_str();
+                let num_str = caps.get(2).map_or("", |m| m.as_str());
                 if let Ok(num) = Decimal::from_str_exact(num_str) {
                     let label = anchor
                         .text()
@@ -513,6 +509,17 @@ pub fn fetch_single_image(
                 .and_then(|h| h.to_str().ok())
                 .unwrap_or("")
                 .to_string();
+
+            if ct.contains("text/html") {
+                let text = res.text().unwrap_or_default();
+                if is_cloudflare_or_rate_limited(status, &text) {
+                    return Err(anyhow::Error::from(RateLimitError::new(
+                        Some(status),
+                        "Image CDN returned Cloudflare challenge page",
+                    )));
+                }
+                bail!("Expected image but received HTML from {}", img_url);
+            }
 
             let mut data = match res.content_length() {
                 Some(len) if len < 50 * 1024 * 1024 => Vec::with_capacity(len as usize),

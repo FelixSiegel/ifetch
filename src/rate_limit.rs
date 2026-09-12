@@ -89,17 +89,17 @@ fn update_min(target: &mut Option<usize>, val: usize) {
 /// and `on_rate_limit_hit` share identical lifecycle semantics.
 /// Returns `true` if cooldown was expired.
 fn expire_cooldown_if_needed(inner: &mut RateLimiterInner, now: Instant) -> bool {
-    if let Some(until) = inner.cooldown_until {
-        if now >= until {
-            inner.cooldown_until = None;
-            inner.schedule_generation = inner.schedule_generation.wrapping_add(1);
-            inner.next_permit_at = now;
-            // Set to `until` (cooldown expiration instant) so true post-cooldown idle time
-            // is measured accurately without stalling an extra 15s or causing clock skew.
-            inner.last_permit_granted_at = until;
-            info!("Rate limit cooldown expired. Resuming chapter downloads.");
-            return true;
-        }
+    if let Some(until) = inner.cooldown_until
+        && now >= until
+    {
+        inner.cooldown_until = None;
+        inner.schedule_generation = inner.schedule_generation.wrapping_add(1);
+        inner.next_permit_at = now;
+        // Set to `until` (cooldown expiration instant) so true post-cooldown idle time
+        // is measured accurately without stalling an extra 15s or causing clock skew.
+        inner.last_permit_granted_at = until;
+        info!("Rate limit cooldown expired. Resuming chapter downloads.");
+        return true;
     }
     false
 }
@@ -536,12 +536,11 @@ pub fn is_rate_limit_error(e: &anyhow::Error) -> bool {
             return true;
         }
 
-        if let Some(req_err) = cause.downcast_ref::<reqwest::Error>() {
-            if let Some(status) = req_err.status() {
-                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    return true;
-                }
-            }
+        if let Some(req_err) = cause.downcast_ref::<reqwest::Error>()
+            && let Some(status) = req_err.status()
+            && status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            return true;
         }
     }
 
