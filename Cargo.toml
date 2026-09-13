@@ -1,6 +1,6 @@
 [package]
 name = "ifetch"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 description = "A fast MangaKatana downloader and self-hosted manga archive server"
 repository = "https://github.com/FelixSiegel/ifetch"
