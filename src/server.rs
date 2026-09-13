@@ -32,56 +32,30 @@ use url::Url;
 
 /// Starts the Tachiyomi/Mihon compatible HTTP server, initializes the background download pool,
 /// cache, database, and scheduled cron auto-updater.
-pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: usize) {
-    let _ = env_logger::try_init();
+pub fn run_server(
+    port: u16,
+    output_dir: PathBuf,
+    config_dir: PathBuf,
+    threads: usize,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&output_dir)?;
+    std::fs::create_dir_all(&config_dir)?;
 
-    if let Err(e) = std::fs::create_dir_all(&output_dir) {
-        error!(
-            "Failed to create output directory {}: {}",
-            output_dir.display(),
-            e
-        );
-        return;
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&config_dir) {
-        error!(
-            "Failed to create config directory {}: {}",
-            config_dir.display(),
-            e
-        );
-        return;
-    }
-
-    let server = match Server::http(format!("0.0.0.0:{}", port)) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            error!("Failed to bind server to 0.0.0.0:{}: {}", port, e);
-            return;
-        }
-    };
+    let server = Server::http(format!("0.0.0.0:{}", port))
+        .map_err(|e| anyhow::anyhow!("Failed to bind server to 0.0.0.0:{}: {}", port, e))?;
+    let server = Arc::new(server);
     info!("Server running on http://0.0.0.0:{}", port);
 
-    let client = match core::build_client() {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            error!("Failed to build HTTP client: {}", e);
-            return;
-        }
-    };
+    let client = Arc::new(core::build_client()?);
 
     let db_path = config_dir.join("library.db");
-    let db = match init_db(&db_path) {
-        Ok(d) => Arc::new(Mutex::new(d)),
-        Err(e) => {
-            error!(
-                "Failed to initialize database at {}: {}",
-                db_path.display(),
-                e
-            );
-            return;
-        }
-    };
+    let db = Arc::new(Mutex::new(init_db(&db_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to initialize database at {}: {}",
+            db_path.display(),
+            e
+        )
+    })?));
 
     let state = Arc::new(AppState {
         client,
@@ -144,7 +118,12 @@ pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: 
                     }
                     Ok(Err(e)) => {
                         error!("Error handling request {}: {}", path, e);
-                        let status_code = if crate::rate_limit::is_rate_limit_error(&e) {
+                        let is_rate_limit = crate::rate_limit::is_rate_limit_error(&e);
+                        let status_code = if is_rate_limit {
+                            let retry_after = crate::rate_limit::extract_retry_after(&e);
+                            state
+                                .rate_limiter
+                                .on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
                             429
                         } else {
                             500
@@ -169,6 +148,8 @@ pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: 
     for handle in handles {
         let _ = handle.join();
     }
+
+    Ok(())
 }
 
 /// Periodic background task that checks for new chapters of stored mangas and queues downloads.

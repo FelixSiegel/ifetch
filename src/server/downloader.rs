@@ -42,10 +42,7 @@ impl DownloadPool {
                 .spawn(move || {
                     loop {
                         let job = {
-                            let rx_guard = match rx.lock() {
-                                Ok(g) => g,
-                                Err(poisoned) => poisoned.into_inner(),
-                            };
+                            let rx_guard = lock_mutex(&rx);
                             match rx_guard.recv() {
                                 Ok(job) => job,
                                 Err(_) => break, // Pool shutting down
@@ -305,6 +302,12 @@ pub fn queue_background_download(
 
 /// Finalizer invoked when the last chapter task for a manga finishes downloading.
 fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) {
+    let _guard = DownloadGuard {
+        id: tracker.id.clone(),
+        active_downloads: Arc::clone(&state.active_downloads),
+        disarmed: false,
+    };
+
     lock_mutex(&state.cache.chapter_pages)
         .retain(|k, _| !k.starts_with(&format!("{}::", tracker.id)));
 
@@ -369,7 +372,4 @@ fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) 
             first_error: first_err,
         },
     );
-
-    let mut active = lock_mutex(&state.active_downloads);
-    active.remove(&tracker.id);
 }

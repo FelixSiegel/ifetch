@@ -73,7 +73,12 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
 
     let url = format!("https://mangakatana.com/manga/{}", id);
     let (manga, chapters) = manga_chapters(&state.client, &url)?;
-    let _ = upsert_manga(
+
+    let folder = get_folder_name(&manga.title);
+    let manga_dir = state.output_dir.join(&folder);
+    lock_mutex(&state.cache.manga_dirs).insert(id.to_string(), (manga.title.clone(), manga_dir));
+
+    if let Err(e) = upsert_manga(
         &lock_mutex(&state.db),
         id,
         &manga.title,
@@ -83,7 +88,9 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
         CheckTrigger::UserRequest {
             new_chapters: false,
         },
-    );
+    ) {
+        warn!("Failed to upsert manga {} in database: {}", id, e);
+    }
 
     json_response(&manga)
 }

@@ -114,10 +114,7 @@ struct PermitGuard<'a> {
 impl<'a> Drop for PermitGuard<'a> {
     fn drop(&mut self) {
         if self.active {
-            let mut inner = match self.inner.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut inner = lock_mutex(self.inner);
             inner.reserved_permits = inner.reserved_permits.saturating_sub(1);
         }
     }
@@ -258,7 +255,6 @@ impl AdaptiveRateLimiter {
             inner.reserved_permits += 1;
 
             let my_gen = inner.schedule_generation;
-            let wait_dur = slot.saturating_duration_since(now);
 
             // Arm scope guard for panic safety
             let mut guard_tracker = PermitGuard {
@@ -266,16 +262,18 @@ impl AdaptiveRateLimiter {
                 active: true,
             };
 
-            // Wait on condvar while holding the lock; lock is automatically re-acquired when wait_timeout returns
-            let mut guard = if wait_dur > Duration::ZERO {
+            // Wait on condvar while holding the lock; handle spurious wakeups
+            let mut guard = inner;
+            while let Some(wait_dur) = slot.checked_duration_since(Instant::now()) {
                 let (g, _) = self
                     .cvar
-                    .wait_timeout(inner, wait_dur)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                g
-            } else {
-                inner
-            };
+                    .wait_timeout(guard, wait_dur)
+                    .unwrap_or_else(|p| p.into_inner());
+                guard = g;
+                if guard.schedule_generation != my_gen || guard.cooldown_until.is_some() {
+                    break;
+                }
+            }
 
             guard.reserved_permits = guard.reserved_permits.saturating_sub(1);
             guard_tracker.active = false;

@@ -1,7 +1,7 @@
 use crate::{
     models::{Chapter, Manga},
     rate_limit::{self, AdaptiveRateLimiter, RateLimitError, is_rate_limit_error},
-    utils::{chapter_filename, image_extension},
+    utils::{CHAPTER_RE, MANGA_RE, chapter_filename, image_extension},
 };
 use anyhow::{Context, Result, bail};
 use indicatif::ProgressBar;
@@ -24,9 +24,6 @@ use std::{
 use url::Url;
 use zip::write::SimpleFileOptions;
 
-static MANGA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
-static CHAPTER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap());
 static THZQ_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap());
 static URL_RE: LazyLock<Regex> =
@@ -106,8 +103,7 @@ pub fn is_cloudflare_or_rate_limited(status: reqwest::StatusCode, body: &str) ->
 pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     let res = client
         .get(Url::parse_with_params(BASE_URL, &[("search", query)])?)
-        .send()?
-        .error_for_status()?;
+        .send()?;
     let status = res.status();
     let url = res.url().clone();
     let path = url.path().trim_end_matches('/');
@@ -119,6 +115,13 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
             "MangaKatana search temporarily blocked by Cloudflare or rate limit",
         )
         .into());
+    }
+    if !status.is_success() {
+        bail!(
+            "HTTP error {} searching MangaKatana for '{}'",
+            status,
+            query
+        );
     }
     let doc = Html::parse_document(&text);
 
@@ -201,7 +204,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
 /// Fetches manga metadata and the complete sorted list of chapters from a series URL.
 pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>)> {
-    let res = client.get(url).send()?.error_for_status()?;
+    let res = client.get(url).send()?;
     let status = res.status();
     let effective_url = res.url().clone();
     let text = res.text()?;
@@ -211,6 +214,9 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
             "MangaKatana chapter list blocked by Cloudflare or rate limit",
         )
         .into());
+    }
+    if !status.is_success() {
+        bail!("HTTP error {} fetching manga from {}", status, url);
     }
     let doc = Html::parse_document(&text);
 

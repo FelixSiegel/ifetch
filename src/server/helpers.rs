@@ -3,7 +3,7 @@ use tiny_http::{Header, Response};
 
 pub use crate::utils::lock_mutex;
 
-/// Validates that a path or URL segment is non-empty and contains no directory traversal tokens or null bytes.
+/// Validates that a path or URL segment is non-empty and contains no directory traversal tokens, null bytes, or percent encodings.
 pub fn is_valid_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
@@ -11,6 +11,7 @@ pub fn is_valid_segment(s: &str) -> bool {
         && !s.contains('\\')
         && !s.contains("..")
         && !s.contains('\0')
+        && !s.contains('%')
 }
 
 /// Splits and validates a compound chapter ID into `(manga_id, chapter_number)`.

@@ -23,12 +23,13 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    let _ = env_logger::try_init();
+
     let mut args = Cli::parse();
     args.threads = args.threads.max(1);
 
     if args.server {
-        server::run_server(args.port, args.output, args.config, args.threads);
-        return Ok(());
+        return server::run_server(args.port, args.output, args.config, args.threads);
     }
 
     let query = match args.manga {
@@ -86,12 +87,6 @@ fn run() -> anyhow::Result<()> {
         crate::utils::scan_manga_chapters(&manga_output_dir, &manga.title, &chapters);
 
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-    use rayon::prelude::*;
-
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads)
-        .build_global()
-        .unwrap_or(());
 
     let m = MultiProgress::new();
     let style = ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len}")
@@ -102,57 +97,61 @@ fn run() -> anyhow::Result<()> {
     let current_index = std::sync::atomic::AtomicUsize::new(0);
     let chosen_len = chosen.len();
 
-    let saved: usize = (0..args.threads)
-        .into_par_iter()
-        .map(|_| {
-            let mut local_saved = 0;
-            loop {
-                let i = current_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= chosen_len {
-                    break;
-                }
-                let chapter = &chosen[i];
-
-                let pb = m.add(ProgressBar::new(0));
-                pb.set_style(style.clone());
-
-                let ctx = core::ChapterDownloadContext {
-                    client: &client,
-                    manga: &manga,
-                    chapter,
-                    output_dir: &manga_output_dir,
-                    width: max_width,
-                    verify: args.verify,
-                };
-
-                let res = core::download_chapter_with_retry(
-                    &ctx,
-                    &pb,
-                    &rate_limiter,
-                    |cooldown, attempt, max_attempts| {
-                        pb.set_message(format!(
-                            "Rate limited on Ch {}. Pausing {:?} (attempt {}/{})",
-                            chapter.number, cooldown, attempt, max_attempts
-                        ));
-                    },
-                );
-
-                match res {
-                    Ok(Some(_)) => {
-                        local_saved += 1;
+    let saved: usize = std::thread::scope(|s| {
+        let num_workers = args.threads.min(chosen_len);
+        let mut handles = Vec::with_capacity(args.threads);
+        for _ in 0..num_workers {
+            handles.push(s.spawn(|| {
+                let mut local_saved = 0;
+                loop {
+                    let i = current_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= chosen_len {
+                        break;
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        let _ = m.println(format!(
-                            "Failed to download chapter {}: {:#}",
-                            chapter.number, e
-                        ));
+                    let chapter = &chosen[i];
+
+                    let pb = m.add(ProgressBar::new(0));
+                    pb.set_style(style.clone());
+
+                    let ctx = core::ChapterDownloadContext {
+                        client: &client,
+                        manga: &manga,
+                        chapter,
+                        output_dir: &manga_output_dir,
+                        width: max_width,
+                        verify: args.verify,
+                    };
+
+                    let res = core::download_chapter_with_retry(
+                        &ctx,
+                        &pb,
+                        &rate_limiter,
+                        |cooldown, attempt, max_attempts| {
+                            pb.set_message(format!(
+                                "Rate limited on Ch {}. Pausing {:?} (attempt {}/{})",
+                                chapter.number, cooldown, attempt, max_attempts
+                            ));
+                        },
+                    );
+
+                    match res {
+                        Ok(Some(_)) => {
+                            local_saved += 1;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            let _ = m.println(format!(
+                                "Failed to download chapter {}: {:#}",
+                                chapter.number, e
+                            ));
+                        }
                     }
                 }
-            }
-            local_saved
-        })
-        .sum();
+                local_saved
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+    });
 
     let path = manga_output_dir.canonicalize().unwrap_or(manga_output_dir);
     println!("\nDone: {} new CBZ file(s) in {}", saved, path.display());

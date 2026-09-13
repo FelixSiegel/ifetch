@@ -6,10 +6,11 @@ use url::Url;
 static INVALID_CHARS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
 static SPACES_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
-static SERIES_CHAPTER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap());
-static SERIES_MANGA_RE: LazyLock<Regex> =
+
+pub static MANGA_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.\d+$").unwrap());
+pub static CHAPTER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap());
 
 /// Normalizes and extracts the canonical MangaKatana series URL from a user-provided input.
 ///
@@ -28,7 +29,7 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
 
     let path = parsed.path().trim_end_matches('/');
 
-    let path = if let Some(caps) = SERIES_CHAPTER_RE.captures(path) {
+    let path = if let Some(caps) = CHAPTER_RE.captures(path) {
         caps.get(1).map_or(path, |m| m.as_str())
     } else if let Some(stripped) = path.strip_suffix("/download") {
         stripped
@@ -36,7 +37,7 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
         path
     };
 
-    if !SERIES_MANGA_RE.is_match(path) {
+    if !MANGA_RE.is_match(path) {
         bail!("Expected MangaKatana manga or chapter URL");
     }
 
@@ -179,11 +180,21 @@ pub fn image_extension(content_type: &str, data: &[u8], url_path: &str) -> &'sta
     }
 }
 
-/// Escapes XML special characters for inclusion in `ComicInfo.xml`.
+/// Escapes XML special characters and strips invalid XML 1.0 control characters for inclusion in `ComicInfo.xml`.
 pub fn escape_xml(text: &str) -> String {
-    text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            c if c == '\t' || c == '\n' || c == '\r' || !c.is_control() => escaped.push(c),
+            _ => {} // Drop invalid XML 1.0 control characters
+        }
+    }
+    escaped
 }
 
 /// Truncates a string to at most `max_chars` unicode characters, appending `"..."` if truncated.
@@ -263,8 +274,13 @@ pub fn scan_manga_chapters(
     let dir_exists = manga_dir.exists();
 
     for chapter in chapters {
-        let filename = chapter_filename(title, &chapter.number.to_string(), width);
-        if dir_exists && manga_dir.join(&filename).exists() {
+        let num_str = chapter.number.to_string();
+        let filename = chapter_filename(title, &num_str, width);
+        let direct_path = manga_dir.join(&filename);
+
+        if dir_exists
+            && (direct_path.exists() || find_chapter_cbz(manga_dir, title, &num_str).is_some())
+        {
             existing.push(chapter.clone());
         } else {
             missing.push(chapter.clone());
