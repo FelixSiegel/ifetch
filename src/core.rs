@@ -1,6 +1,8 @@
 use crate::{
     models::{Chapter, Manga},
-    rate_limit::{self, AdaptiveRateLimiter, RateLimitError, is_rate_limit_error},
+    rate_limit::{
+        self, AdaptiveRateLimiter, RateLimitError, is_rate_limit_error, is_rate_limited_response,
+    },
     utils::{CHAPTER_RE, MANGA_RE, chapter_filename, image_extension},
 };
 use anyhow::{Context, Result, bail};
@@ -66,37 +68,6 @@ pub fn build_client() -> Result<Client> {
         .context("Failed to build HTTP client")
 }
 
-/// Detects whether an HTTP response indicates a Cloudflare challenge, bot verification,
-/// or rate limiting response.
-pub fn is_cloudflare_or_rate_limited(status: reqwest::StatusCode, body: &str) -> bool {
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status == reqwest::StatusCode::FORBIDDEN
-        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-    {
-        return true;
-    }
-
-    // Cloudflare challenges and bot blocks are always in the HTML head/top section.
-    // Inspect only the first 4KB to avoid scanning large HTML payloads.
-    let prefix = if body.len() > 4096 {
-        match body.char_indices().take_while(|(i, _)| *i <= 4096).last() {
-            Some((i, c)) => &body[..i + c.len_utf8()],
-            None => body,
-        }
-    } else {
-        body
-    };
-
-    prefix.contains("<title>Just a moment...</title>")
-        || prefix.contains("cf-chl-")
-        || prefix.contains("cf-browser-verification")
-        || prefix.contains("Checking your browser")
-        || prefix.contains("Attention Required! | Cloudflare")
-        || (prefix.contains("Cloudflare")
-            && prefix.contains("Ray ID")
-            && !prefix.contains("var thzq"))
-}
-
 /// Searches MangaKatana for manga matching the given query keyword.
 ///
 /// Returns a list of matching `Manga` entries, or an error if rate-limited or unavailable.
@@ -109,12 +80,8 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     let path = url.path().trim_end_matches('/');
 
     let text = res.text()?;
-    if is_cloudflare_or_rate_limited(status, &text) {
-        return Err(RateLimitError::new(
-            Some(status),
-            "MangaKatana search temporarily blocked by Cloudflare or rate limit",
-        )
-        .into());
+    if is_rate_limited_response(status, &text) {
+        return Err(RateLimitError::new("Search blocked or rate limited").into());
     }
     if !status.is_success() {
         bail!(
@@ -208,12 +175,8 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let status = res.status();
     let effective_url = res.url().clone();
     let text = res.text()?;
-    if is_cloudflare_or_rate_limited(status, &text) {
-        return Err(RateLimitError::new(
-            Some(status),
-            "MangaKatana chapter list blocked by Cloudflare or rate limit",
-        )
-        .into());
+    if is_rate_limited_response(status, &text) {
+        return Err(RateLimitError::new("Manga page blocked or rate limited").into());
     }
     if !status.is_success() {
         bail!("HTTP error {} fetching manga from {}", status, url);
@@ -375,9 +338,6 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 
 /// Fetches image URLs for a chapter by probing MangaKatana server mirrors (`""`, `"?sv=mk"`, `"?sv=3"`).
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
-    let mut hit_rate_limit = false;
-    let mut last_status = None;
-
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
         let res = match client.get(&url).send() {
@@ -388,20 +348,23 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
             }
         };
         let status = res.status();
-        last_status = Some(status);
-
+        let retry_after = rate_limit::parse_retry_after(res.headers());
         let text = match res.text() {
             Ok(t) => t,
             Err(_) => continue,
         };
 
-        if is_cloudflare_or_rate_limited(status, &text) {
-            hit_rate_limit = true;
-            break;
-        }
-
-        if !status.is_success() {
-            continue;
+        if is_rate_limited_response(status, &text) {
+            return Err(RateLimitError::with_retry_after(
+                format!(
+                    "Rate limit or anti-bot block (HTTP {}, {} bytes) from {}",
+                    status,
+                    text.len(),
+                    url
+                ),
+                retry_after,
+            )
+            .into());
         }
 
         if let Some(caps) = THZQ_RE.captures(&text) {
@@ -420,14 +383,7 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
         }
     }
 
-    if hit_rate_limit {
-        return Err(RateLimitError::new(
-            last_status,
-            "Cloudflare challenge or rate limit detected while fetching chapter images",
-        )
-        .into());
-    }
-    bail!("Chapter contains no downloadable images")
+    Err(RateLimitError::new("Chapter contains no downloadable images across mirrors").into())
 }
 
 /// Generates the `ComicInfo.xml` metadata file contents for a CBZ archive.
@@ -478,31 +434,13 @@ pub fn fetch_single_image(
             let mut res = client.get(img_url).header("Referer", referer).send()?;
 
             let status = res.status();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = res
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs);
-
-                return Err(RateLimitError::new(
-                    Some(status),
-                    "Image CDN returned HTTP 429 Too Many Requests",
-                )
-                .with_retry_after(retry_after)
-                .into());
-            }
-
+            let retry_after = rate_limit::parse_retry_after(res.headers());
             if !status.is_success() {
-                let text = res.text().unwrap_or_default();
-                if is_cloudflare_or_rate_limited(status, &text) {
-                    return Err(anyhow::Error::from(RateLimitError::new(
-                        Some(status),
-                        "Image CDN returned Cloudflare challenge page",
-                    )));
-                }
-                bail!("HTTP error {} downloading image from {}", status, img_url);
+                return Err(RateLimitError::with_retry_after(
+                    format!("HTTP {} downloading image from {}", status, img_url),
+                    retry_after,
+                )
+                .into());
             }
 
             let ct = res
@@ -513,14 +451,11 @@ pub fn fetch_single_image(
                 .to_string();
 
             if ct.contains("text/html") {
-                let text = res.text().unwrap_or_default();
-                if is_cloudflare_or_rate_limited(status, &text) {
-                    return Err(anyhow::Error::from(RateLimitError::new(
-                        Some(status),
-                        "Image CDN returned Cloudflare challenge page",
-                    )));
-                }
-                bail!("Expected image but received HTML from {}", img_url);
+                return Err(RateLimitError::with_retry_after(
+                    format!("Received HTML instead of image data from {}", img_url),
+                    retry_after,
+                )
+                .into());
             }
 
             let mut data = match res.content_length() {
@@ -679,12 +614,15 @@ where
                 rate_limiter.on_chapter_success();
                 return Ok(val);
             }
-            Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
+            Err(e) if is_rate_limit_error(&e) => {
                 let retry_after = rate_limit::extract_retry_after(&e);
                 let cooldown =
                     rate_limiter.on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
-                on_retry(cooldown, attempts, max_attempts);
-                thread::sleep(cooldown);
+                if attempts < max_attempts {
+                    on_retry(cooldown, attempts, max_attempts);
+                } else {
+                    return Err(e);
+                }
             }
             Err(e) => return Err(e),
         }

@@ -13,7 +13,7 @@ pub const DELAY_STEP_UP_MS: u64 = 150;
 pub const DELAY_STEP_DOWN_MS: u64 = 25;
 pub const CONSECUTIVE_SUCCESS_RELAX: usize = 20;
 /// Baseline cooldown duration upon encountering the first rate limit block.
-pub const BASE_COOLDOWN_SECS: u64 = 30;
+pub const BASE_COOLDOWN_SECS: u64 = 60;
 /// Maximum duration for adaptive cooldown escalation.
 /// Explicit upstream `Retry-After` headers can exceed this cap.
 pub const MAX_COOLDOWN_SECS: u64 = 180;
@@ -445,116 +445,76 @@ impl AdaptiveRateLimiter {
     }
 }
 
-/// Category of rate limiting event encountered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitKind {
-    Http429,
-    CloudflareChallenge,
-    Other,
-}
-
-/// Dedicated typed error representing an HTTP rate limit or Cloudflare challenge.
+/// Typed error representing an HTTP rate limit or anti-bot block.
 #[derive(Debug, Clone)]
 pub struct RateLimitError {
-    pub kind: RateLimitKind,
-    pub status: Option<reqwest::StatusCode>,
-    pub retry_after: Option<Duration>,
     pub reason: String,
+    pub retry_after: Option<Duration>,
 }
 
 impl RateLimitError {
-    pub fn new(status: Option<reqwest::StatusCode>, reason: impl Into<String>) -> Self {
-        Self::with_retry(status, reason, None)
-    }
-
-    pub fn with_retry(
-        status: Option<reqwest::StatusCode>,
-        reason: impl Into<String>,
-        retry_after: Option<Duration>,
-    ) -> Self {
-        let reason_str = reason.into();
-        let kind = if status == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
-            RateLimitKind::Http429
-        } else if reason_str.to_ascii_lowercase().contains("cloudflare") {
-            RateLimitKind::CloudflareChallenge
-        } else {
-            RateLimitKind::Other
-        };
+    pub fn new(reason: impl Into<String>) -> Self {
         Self {
-            kind,
-            status,
-            retry_after,
-            reason: reason_str,
-        }
-    }
-
-    pub fn with_kind(
-        status: Option<reqwest::StatusCode>,
-        reason: impl Into<String>,
-        kind: RateLimitKind,
-    ) -> Self {
-        Self {
-            kind,
-            status,
-            retry_after: None,
             reason: reason.into(),
+            retry_after: None,
         }
     }
 
-    pub fn with_retry_after(mut self, retry_after: Option<Duration>) -> Self {
-        self.retry_after = retry_after;
-        self
-    }
-
-    pub fn retry_after(&self) -> Option<Duration> {
-        self.retry_after
+    pub fn with_retry_after(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            reason: reason.into(),
+            retry_after,
+        }
     }
 }
 
 impl std::fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.status {
-            Some(status) => write!(
-                f,
-                "Rate limited by Cloudflare/MangaKatana (status {}): {}",
-                status, self.reason
-            ),
-            None => write!(f, "Rate limited by Cloudflare/MangaKatana: {}", self.reason),
-        }
+        write!(f, "{}", self.reason)
     }
 }
 
 impl std::error::Error for RateLimitError {}
 
-/// Checks whether an error represents a Cloudflare challenge or HTTP rate limit
-/// by inspecting typed RateLimitErrors, reqwest status codes, and error chains.
+/// Parses the standard HTTP `Retry-After` header (in seconds) if present in response headers.
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+/// Extracts an explicit `Retry-After` duration if present in the error chain.
+pub fn extract_retry_after(e: &anyhow::Error) -> Option<Duration> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<RateLimitError>())
+        .and_then(|r| r.retry_after)
+}
+
+/// Checks whether an HTTP response indicates a rate limit, anti-bot challenge, or empty block.
+pub fn is_rate_limited_response(status: reqwest::StatusCode, body: &str) -> bool {
+    !status.is_success()
+        || body.trim().is_empty()
+        || body.contains("challenge")
+        || body.contains("turnstile")
+        || body.contains("cf-chl")
+        || body.contains("Just a moment...")
+}
+
+/// Checks whether an error represents an HTTP rate limit or network block.
 pub fn is_rate_limit_error(e: &anyhow::Error) -> bool {
     for cause in e.chain() {
         if cause.downcast_ref::<RateLimitError>().is_some() {
             return true;
         }
-
         if let Some(req_err) = cause.downcast_ref::<reqwest::Error>()
-            && let Some(status) = req_err.status()
-            && status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            && (req_err.status().is_some_and(|s| !s.is_success())
+                || req_err.is_timeout()
+                || req_err.is_connect())
         {
             return true;
         }
     }
-
-    let msg = format!("{:?}", e);
-    let lower = msg.to_ascii_lowercase();
-    lower.contains("cf-chl-bypass")
-        || lower.contains("challenge-platform")
-        || lower.contains("just a moment...")
-        || (lower.contains("turnstile") && lower.contains("challenge"))
-        || lower.contains("rate limited")
-        || lower.contains("429 too many requests")
-}
-
-/// Helper to extract an explicit Retry-After duration if present in the error chain.
-pub fn extract_retry_after(e: &anyhow::Error) -> Option<Duration> {
-    e.chain()
-        .find_map(|c| c.downcast_ref::<RateLimitError>())
-        .and_then(|rle| rle.retry_after())
+    false
 }
