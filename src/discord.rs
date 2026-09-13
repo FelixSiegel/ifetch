@@ -54,6 +54,10 @@ pub enum NotificationType<'a> {
         manga_url: &'a str,
         error_msg: &'a str,
     },
+    Update {
+        old_version: Option<&'a str>,
+        new_version: &'a str,
+    },
 }
 
 pub fn send_webhook(client: &Client, notify_type: NotificationType) {
@@ -175,6 +179,34 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
                 inline: true,
             }],
         },
+        NotificationType::Update {
+            old_version,
+            new_version,
+        } => {
+            let description = match old_version {
+                Some(old) => format!(
+                    "iFetch has been updated from **v{}** to **v{}**.",
+                    old.trim_start_matches('v'),
+                    new_version.trim_start_matches('v')
+                ),
+                None => format!(
+                    "iFetch has been updated to **v{}**.",
+                    new_version.trim_start_matches('v')
+                ),
+            };
+
+            Embed {
+                author,
+                title: "iFetch Updated",
+                url: Some(concat!(
+                    "https://github.com/FelixSiegel/ifetch/releases/tag/v",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                description: Some(description),
+                color: 0x9b59b6, // Purple
+                fields: Vec::new(),
+            }
+        }
     };
 
     let payload = WebhookPayload {

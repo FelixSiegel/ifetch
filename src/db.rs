@@ -50,6 +50,14 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )",
+        [],
+    )?;
+
     Ok(conn)
 }
 
@@ -164,4 +172,31 @@ pub fn get_manga_title(conn: &Connection, id: &str) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+/// Checks if the running version differs from the stored database version.
+/// If an upgrade is detected, updates the database and returns the previous version string (if known).
+pub fn check_version_update(conn: &Connection, current: &str) -> Result<Option<Option<String>>> {
+    let old = conn
+        .query_row("SELECT value FROM meta WHERE key = 'version'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok();
+
+    let is_update = match &old {
+        Some(v) => v != current,
+        None => conn
+            .query_row("SELECT 1 FROM mangas LIMIT 1", [], |_| Ok(()))
+            .is_ok(),
+    };
+
+    if old.as_deref() != Some(current) {
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![current],
+        )?;
+    }
+
+    if is_update { Ok(Some(old)) } else { Ok(None) }
 }

@@ -7,7 +7,7 @@ pub mod state;
 use crate::{
     config::CRON_HOURS,
     core::{self, manga_chapters},
-    db::{CheckTrigger, get_mangas_to_check, init_db, upsert_manga},
+    db::{CheckTrigger, check_version_update, get_mangas_to_check, init_db, upsert_manga},
     rate_limit::AdaptiveRateLimiter,
     server::{
         cache::ServerCache,
@@ -49,13 +49,26 @@ pub fn run_server(
     let client = Arc::new(core::build_client()?);
 
     let db_path = config_dir.join("library.db");
-    let db = Arc::new(Mutex::new(init_db(&db_path).map_err(|e| {
+    let conn = init_db(&db_path).map_err(|e| {
         anyhow::anyhow!(
             "Failed to initialize database at {}: {}",
             db_path.display(),
             e
         )
-    })?));
+    })?;
+
+    let version = env!("CARGO_PKG_VERSION");
+    if let Ok(Some(old_ver)) = check_version_update(&conn, version) {
+        crate::discord::send_webhook(
+            &client,
+            crate::discord::NotificationType::Update {
+                old_version: old_ver.as_deref(),
+                new_version: version,
+            },
+        );
+    }
+
+    let db = Arc::new(Mutex::new(conn));
 
     let state = Arc::new(AppState {
         client,
