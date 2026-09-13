@@ -44,12 +44,49 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
     Ok(Some(base.join(path)?.to_string()))
 }
 
+/// Acquires a lock on a mutex, recovering gracefully if another thread panicked while holding it.
+pub fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Sanitizes a title or folder name by removing invalid filesystem characters,
+/// collapsing whitespaces, trimming dots and spaces, and limiting length.
+pub fn sanitize_name(name: &str, max_chars: usize) -> String {
+    let cleaned = INVALID_CHARS_RE.replace_all(name, "");
+    let cleaned = SPACES_RE.replace_all(&cleaned, " ");
+    let mut cleaned = cleaned.trim_matches([' ', '.']).to_string();
+    if cleaned.is_empty() {
+        return "manga".to_string();
+    }
+
+    let mut chars: Vec<char> = cleaned.chars().collect();
+    if chars.len() > max_chars {
+        chars.truncate(max_chars);
+        cleaned = chars.into_iter().collect();
+        cleaned = cleaned.trim_end_matches([' ', '.']).to_string();
+    }
+
+    if cleaned.is_empty() {
+        "manga".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Generates a sanitized, zero-padded filename for a chapter CBZ archive.
 ///
 /// For example: `"Initial D - Chapter 001.cbz"`
 pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
     let parts: Vec<&str> = number_str.split('.').collect();
     let whole = parts[0];
+    let whole_trimmed = whole.trim_start_matches('0');
+    let whole = if whole_trimmed.is_empty() {
+        "0"
+    } else {
+        whole_trimmed
+    };
 
     let mut padded = String::new();
     if whole.len() < width {
@@ -61,45 +98,13 @@ pub fn chapter_filename(title: &str, number_str: &str, width: usize) -> String {
         padded.push_str(parts[1]);
     }
 
-    let mut clean_title = INVALID_CHARS_RE.replace_all(title, "").to_string();
-    clean_title = SPACES_RE.replace_all(&clean_title, " ").to_string();
-    clean_title = clean_title.trim_matches([' ', '.']).to_string();
-
-    if clean_title.is_empty() {
-        clean_title = "manga".to_string();
-    }
-
-    let mut chars: Vec<char> = clean_title.chars().collect();
-    if chars.len() > 100 {
-        chars.truncate(100);
-        clean_title = chars.into_iter().collect();
-        clean_title = clean_title.trim_end_matches([' ', '.']).to_string();
-    }
-
+    let clean_title = sanitize_name(title, 100);
     format!("{} - Chapter {}.cbz", clean_title, padded)
 }
 
 /// Computes a filesystem-safe directory name for a given manga title.
 pub fn get_folder_name(title: &str) -> String {
-    let folder_name = INVALID_CHARS_RE.replace_all(title, "");
-    let folder_name = SPACES_RE.replace_all(&folder_name, " ");
-    let mut folder_name = folder_name.trim_matches([' ', '.']).to_string();
-    if folder_name.is_empty() {
-        return "manga".to_string();
-    }
-
-    let mut chars: Vec<char> = folder_name.chars().collect();
-    if chars.len() > 120 {
-        chars.truncate(120);
-        folder_name = chars.into_iter().collect();
-        folder_name = folder_name.trim_end_matches([' ', '.']).to_string();
-    }
-
-    if folder_name.is_empty() {
-        "manga".to_string()
-    } else {
-        folder_name
-    }
+    sanitize_name(title, 120)
 }
 
 /// Searches for an existing CBZ file for a chapter across multiple possible padding widths.

@@ -41,7 +41,7 @@ pub struct Cli {
     pub server: bool,
 
     /// Server port
-    #[arg(long, env = "IFETCH_PORT", default_value = "8080")]
+    #[arg(short = 'p', long, env = "IFETCH_PORT", default_value = "8080")]
     pub port: u16,
 }
 

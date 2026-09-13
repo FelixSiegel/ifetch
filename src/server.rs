@@ -113,8 +113,13 @@ pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: 
                 };
 
                 let raw_url = request.url();
-                let url_str = format!("http://localhost{}", raw_url);
-                let parsed_url = match Url::parse(&url_str) {
+                let parsed_url =
+                    if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+                        Url::parse(raw_url)
+                    } else {
+                        Url::parse(&format!("http://localhost{}", raw_url))
+                    };
+                let parsed_url = match parsed_url {
                     Ok(u) => u,
                     Err(e) => {
                         warn!("Malformed URL in request '{}': {}", raw_url, e);
@@ -139,8 +144,14 @@ pub fn run_server(port: u16, output_dir: PathBuf, config_dir: PathBuf, threads: 
                     }
                     Ok(Err(e)) => {
                         error!("Error handling request {}: {}", path, e);
+                        let status_code = if crate::rate_limit::is_rate_limit_error(&e) {
+                            429
+                        } else {
+                            500
+                        };
                         let _ = request.respond(
-                            Response::from_string(format!("Error: {}", e)).with_status_code(500),
+                            Response::from_string(format!("Error: {}", e))
+                                .with_status_code(status_code),
                         );
                     }
                     Err(panic_err) => {
@@ -180,27 +191,36 @@ fn run_cron(state: &Arc<AppState>) {
             for manga_chk in mangas_to_check {
                 sleep(Duration::from_secs(2));
                 let url = format!("https://mangakatana.com/manga/{}", manga_chk.id);
-                if let Ok((manga, chapters)) = manga_chapters(&state.client, &url) {
-                    let folder = get_folder_name(&manga.title);
-                    let manga_dir = state.output_dir.join(&folder);
-                    let (_, existing, missing) =
-                        crate::utils::scan_manga_chapters(&manga_dir, &manga.title, &chapters);
-                    let local_count = existing.len();
-                    let did_update = !missing.is_empty();
-                    let _ = upsert_manga(
-                        &lock_mutex(&state.db),
-                        &manga_chk.id,
-                        &manga.title,
-                        &manga.status,
-                        chapters.len(),
-                        Some(local_count),
-                        CheckTrigger::Cron {
-                            new_chapters: did_update,
-                        },
-                    );
+                match manga_chapters(&state.client, &url) {
+                    Ok((manga, chapters)) => {
+                        let folder = get_folder_name(&manga.title);
+                        let manga_dir = state.output_dir.join(&folder);
+                        let (_, existing, missing) =
+                            crate::utils::scan_manga_chapters(&manga_dir, &manga.title, &chapters);
+                        let local_count = existing.len();
+                        let did_update = !missing.is_empty();
+                        let _ = upsert_manga(
+                            &lock_mutex(&state.db),
+                            &manga_chk.id,
+                            &manga.title,
+                            &manga.status,
+                            chapters.len(),
+                            Some(local_count),
+                            CheckTrigger::Cron {
+                                new_chapters: did_update,
+                            },
+                        );
 
-                    if did_update {
-                        queue_background_download(&manga_chk.id, state, Some((manga, chapters)));
+                        if did_update {
+                            queue_background_download(
+                                &manga_chk.id,
+                                state,
+                                Some((manga, chapters)),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Auto-update check failed for {}: {}", manga_chk.id, e);
                     }
                 }
             }

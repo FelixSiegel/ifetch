@@ -3,7 +3,6 @@ use crate::{
     db::{CheckTrigger, upsert_manga},
     discord::{NotificationType, send_webhook},
     models::{Chapter, Manga},
-    rate_limit::{extract_retry_after, is_rate_limit_error},
     server::{helpers::lock_mutex, state::AppState},
     utils::{get_folder_name, scan_manga_chapters, truncate_str},
 };
@@ -31,6 +30,7 @@ pub struct DownloadPool {
 impl DownloadPool {
     /// Spawns a new download pool with `threads` worker threads.
     pub fn new(threads: usize) -> Self {
+        let threads = threads.max(1);
         let (sender, receiver) = channel::<Job>();
         let receiver = Arc::new(Mutex::new(receiver));
         let mut workers = Vec::with_capacity(threads);
@@ -255,43 +255,27 @@ pub fn queue_background_download(
                     completed: false,
                 };
 
-                let mut attempts = 0;
-                let max_attempts = 3;
-
-                let res = loop {
-                    attempts += 1;
-                    state.rate_limiter.wait_for_chapter_permit();
-
-                    let pb = indicatif::ProgressBar::hidden();
-                    let dl_res = core::download_chapter(
-                        &state.client,
-                        &tracker.manga,
-                        &chapter,
-                        &tracker.output_dir,
-                        tracker.max_width,
-                        false,
-                        &pb,
-                    );
-
-                    match dl_res {
-                        Ok(val) => {
-                            state.rate_limiter.on_chapter_success();
-                            break Ok(val);
-                        }
-                        Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
-                            let retry_after = extract_retry_after(&e);
-                            let cooldown = state
-                                .rate_limiter
-                                .on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
-                            warn!(
-                                "Rate limit encountered on chapter {} for {}. Pausing worker for {:?} before retry (attempt {}/{})",
-                                chapter.number, tracker.manga.title, cooldown, attempts, max_attempts
-                            );
-                            std::thread::sleep(cooldown);
-                        }
-                        Err(e) => break Err(e),
-                    }
+                let pb = indicatif::ProgressBar::hidden();
+                let ctx = core::ChapterDownloadContext {
+                    client: &state.client,
+                    manga: &tracker.manga,
+                    chapter: &chapter,
+                    output_dir: &tracker.output_dir,
+                    width: tracker.max_width,
+                    verify: false,
                 };
+
+                let res = core::download_chapter_with_retry(
+                    &ctx,
+                    &pb,
+                    &state.rate_limiter,
+                    |cooldown, attempt, max_attempts| {
+                        warn!(
+                            "Rate limit encountered on chapter {} for {}. Pausing worker for {:?} before retry (attempt {}/{})",
+                            chapter.number, tracker.manga.title, cooldown, attempt, max_attempts
+                        );
+                    },
+                );
 
                 match res {
                     Ok(Some(_)) | Ok(None) => {

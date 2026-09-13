@@ -1,6 +1,8 @@
 use reqwest::blocking::Client;
 use serde::Serialize;
 
+use crate::utils::truncate_str;
+
 #[derive(Serialize)]
 pub struct WebhookPayload<'a> {
     pub embeds: Vec<Embed<'a>>,
@@ -143,7 +145,7 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
             if let Some(err) = first_error {
                 fields.push(Field {
                     name: "Error Details",
-                    value: crate::utils::truncate_str(err, 250).to_string(),
+                    value: truncate_str(err, 250),
                     inline: false,
                 });
             }

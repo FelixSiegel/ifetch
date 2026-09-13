@@ -9,7 +9,7 @@ mod server;
 mod utils;
 
 use crate::cli::Cli;
-use crate::rate_limit::{AdaptiveRateLimiter, is_rate_limit_error};
+use crate::rate_limit::AdaptiveRateLimiter;
 use crate::utils::truncate_str;
 use clap::Parser;
 use std::process;
@@ -116,41 +116,26 @@ fn run() -> anyhow::Result<()> {
                 let pb = m.add(ProgressBar::new(0));
                 pb.set_style(style.clone());
 
-                let mut attempts = 0;
-                let max_attempts = 3;
-
-                let res = loop {
-                    attempts += 1;
-                    rate_limiter.wait_for_chapter_permit();
-
-                    let dl_res = core::download_chapter(
-                        &client,
-                        &manga,
-                        chapter,
-                        &manga_output_dir,
-                        max_width,
-                        args.verify,
-                        &pb,
-                    );
-
-                    match dl_res {
-                        Ok(val) => {
-                            rate_limiter.on_chapter_success();
-                            break Ok(val);
-                        }
-                        Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
-                            let retry_after = rate_limit::extract_retry_after(&e);
-                            let cooldown = rate_limiter
-                                .on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
-                            pb.set_message(format!(
-                                "Rate limited on Ch {}. Pausing {:?} (attempt {}/{})",
-                                chapter.number, cooldown, attempts, max_attempts
-                            ));
-                            std::thread::sleep(cooldown);
-                        }
-                        Err(e) => break Err(e),
-                    }
+                let ctx = core::ChapterDownloadContext {
+                    client: &client,
+                    manga: &manga,
+                    chapter,
+                    output_dir: &manga_output_dir,
+                    width: max_width,
+                    verify: args.verify,
                 };
+
+                let res = core::download_chapter_with_retry(
+                    &ctx,
+                    &pb,
+                    &rate_limiter,
+                    |cooldown, attempt, max_attempts| {
+                        pb.set_message(format!(
+                            "Rate limited on Ch {}. Pausing {:?} (attempt {}/{})",
+                            chapter.number, cooldown, attempt, max_attempts
+                        ));
+                    },
+                );
 
                 match res {
                     Ok(Some(_)) => {

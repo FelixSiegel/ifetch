@@ -1,17 +1,16 @@
 use std::io::Cursor;
-use std::sync::{Mutex, MutexGuard};
 use tiny_http::{Header, Response};
 
-/// Acquires a lock on a mutex, recovering gracefully if another thread panicked while holding it.
-pub fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+pub use crate::utils::lock_mutex;
 
-/// Validates that a path or URL segment is non-empty and contains no directory traversal tokens.
+/// Validates that a path or URL segment is non-empty and contains no directory traversal tokens or null bytes.
 pub fn is_valid_segment(s: &str) -> bool {
-    !s.is_empty() && s != "." && !s.contains('/') && !s.contains('\\') && !s.contains("..")
+    !s.is_empty()
+        && s != "."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains("..")
+        && !s.contains('\0')
 }
 
 /// Splits and validates a compound chapter ID into `(manga_id, chapter_number)`.

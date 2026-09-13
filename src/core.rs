@@ -1,9 +1,10 @@
 use crate::{
     models::{Chapter, Manga},
-    rate_limit::{RateLimitError, is_rate_limit_error},
+    rate_limit::{self, AdaptiveRateLimiter, RateLimitError, is_rate_limit_error},
     utils::{chapter_filename, image_extension},
 };
 use anyhow::{Context, Result, bail};
+use indicatif::ProgressBar;
 use regex::Regex;
 use reqwest::{
     blocking::Client,
@@ -27,7 +28,7 @@ static MANGA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/manga/[^/]+\.
 static CHAPTER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(/manga/[^/]+\.\d+)/c([^/]+)$").unwrap());
 static THZQ_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap());
+    LazyLock::new(|| Regex::new(r"(?s)var\s+thzq\s*=\s*\[(.*?)\]\s*;").unwrap());
 static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"['"](https?://[^'"]+)['"]"#).unwrap());
 
@@ -46,6 +47,11 @@ static ALT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".alt_name
 static ANCHOR_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 
 const BASE_URL: &str = "https://mangakatana.com/";
+
+/// Extracts and normalizes text content from a parsed HTML element.
+fn element_text(el: &scraper::ElementRef) -> String {
+    el.text().collect::<Vec<_>>().join(" ").trim().to_string()
+}
 
 pub fn build_client() -> Result<Client> {
     let mut headers = HeaderMap::new();
@@ -120,7 +126,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
         let title = doc
             .select(&H1_SEL)
             .next()
-            .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+            .map(|e| element_text(&e))
             .unwrap_or_else(|| query.to_string());
 
         let cover_url = doc
@@ -133,8 +139,8 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
         let status = doc
             .select(&STATUS_SEL)
             .next()
-            .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
-            .unwrap_or("".to_string());
+            .map(|e| element_text(&e))
+            .unwrap_or_default();
 
         return Ok(vec![Manga {
             id: path.split('/').next_back().unwrap_or("").to_string(),
@@ -161,12 +167,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
             let p = joined.path().trim_end_matches('/');
             if MANGA_RE.is_match(p) && !seen.contains(joined.as_str()) {
                 seen.insert(joined.to_string());
-                let title = anchor
-                    .text()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .trim()
-                    .to_string();
+                let title = element_text(&anchor);
 
                 let cover_url = item
                     .select(&WRAP_IMG_SEL)
@@ -178,8 +179,8 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
                 let status = item
                     .select(&STATUS_SEL)
                     .next()
-                    .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
-                    .unwrap_or("".to_string());
+                    .map(|e| element_text(&e))
+                    .unwrap_or_default();
 
                 results.push(Manga {
                     id: p.split('/').next_back().unwrap_or("").to_string(),
@@ -202,6 +203,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>)> {
     let res = client.get(url).send()?.error_for_status()?;
     let status = res.status();
+    let effective_url = res.url().clone();
     let text = res.text()?;
     if is_cloudflare_or_rate_limited(status, &text) {
         return Err(RateLimitError::new(
@@ -212,14 +214,13 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     }
     let doc = Html::parse_document(&text);
 
-    let parsed_url = Url::parse(url)?;
-    let manga_path = parsed_url.path().trim_end_matches('/');
+    let manga_path = effective_url.path().trim_end_matches('/');
     let id = manga_path.split('/').next_back().unwrap_or("").to_string();
 
     let title = doc
         .select(&H1_SEL)
         .next()
-        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|e| element_text(&e))
         .unwrap_or_else(|| {
             if id.is_empty() {
                 "manga".to_string()
@@ -231,25 +232,25 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let description = doc
         .select(&SUMMARY_P_SEL)
         .next()
-        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|e| element_text(&e))
         .unwrap_or_default();
 
     let genres: Vec<String> = doc
         .select(&GENRES_SEL)
-        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|e| element_text(&e))
         .filter(|s| !s.is_empty())
         .collect();
 
     let authors: Vec<String> = doc
         .select(&AUTHORS_SEL)
-        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|e| element_text(&e))
         .filter(|s| !s.is_empty())
         .collect();
 
     let alt_names: Vec<String> = doc
         .select(&ALT_SEL)
         .next()
-        .map(|e| e.text().collect::<Vec<_>>().join(" "))
+        .map(|e| element_text(&e))
         .unwrap_or_default()
         .split(';')
         .map(|s| s.trim().to_string())
@@ -266,13 +267,13 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let status = doc
         .select(&STATUS_SEL)
         .next()
-        .map(|e| e.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|e| element_text(&e))
         .unwrap_or_default();
 
     let manga = Manga {
         id,
         title,
-        url: url.to_string(),
+        url: effective_url.to_string(),
         cover_url,
         status,
         description,
@@ -296,12 +297,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
             {
                 let num_str = caps.get(2).map_or("", |m| m.as_str());
                 if let Ok(num) = Decimal::from_str_exact(num_str) {
-                    let label = anchor
-                        .text()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .trim()
-                        .to_string();
+                    let label = element_text(&anchor);
                     let label = if label.is_empty() {
                         format!("Chapter {}", num_str)
                     } else {
@@ -526,6 +522,9 @@ pub fn fetch_single_image(
                 _ => Vec::new(),
             };
             res.copy_to(&mut data)?;
+            if data.is_empty() {
+                bail!("Received empty image data (0 bytes) from {}", img_url);
+            }
             Ok((data, ct))
         })();
 
@@ -556,41 +555,47 @@ pub fn fetch_single_image(
     }
 }
 
+/// Parameters and context required for downloading and packaging a single chapter.
+pub struct ChapterDownloadContext<'a> {
+    pub client: &'a Client,
+    pub manga: &'a Manga,
+    pub chapter: &'a Chapter,
+    pub output_dir: &'a Path,
+    pub width: usize,
+    pub verify: bool,
+}
+
 /// Downloads all pages for a chapter, builds a `ComicInfo.xml` metadata file,
 /// and packages the content into a CBZ archive.
-pub fn download_chapter(
-    client: &Client,
-    manga: &Manga,
-    chapter: &Chapter,
-    output_dir: &Path,
-    width: usize,
-    verify: bool,
-    pb: &indicatif::ProgressBar,
-) -> Result<Option<PathBuf>> {
-    std::fs::create_dir_all(output_dir)?;
-    let filename = chapter_filename(&manga.title, &chapter.number.to_string(), width);
-    let dest = output_dir.join(&filename);
+pub fn download_chapter(ctx: &ChapterDownloadContext, pb: &ProgressBar) -> Result<Option<PathBuf>> {
+    std::fs::create_dir_all(ctx.output_dir)?;
+    let filename = chapter_filename(&ctx.manga.title, &ctx.chapter.number.to_string(), ctx.width);
+    let dest = ctx.output_dir.join(&filename);
 
-    if !verify && dest.exists() {
-        pb.finish_with_message(format!("Skipped Chapter {}", chapter.number));
+    if !ctx.verify && dest.exists() {
+        pb.finish_with_message(format!("Skipped Chapter {}", ctx.chapter.number));
         return Ok(None);
     }
 
-    pb.set_message(format!("Chapter {}...", chapter.number));
-    let urls = chapter_images(client, &chapter.url)?;
+    pb.set_message(format!("Chapter {}...", ctx.chapter.number));
+    let urls = chapter_images(ctx.client, &ctx.chapter.url)?;
 
     if dest.exists() {
         if is_chapter_up_to_date(&dest, urls.len()) {
-            pb.finish_with_message(format!("Skipped Chapter {}", chapter.number));
+            pb.finish_with_message(format!("Skipped Chapter {}", ctx.chapter.number));
             return Ok(None);
         }
         pb.set_message(format!(
             "Updating Ch {} ({} pages)",
-            chapter.number,
+            ctx.chapter.number,
             urls.len()
         ));
     } else {
-        pb.set_message(format!("Chapter {} ({} pages)", chapter.number, urls.len()));
+        pb.set_message(format!(
+            "Chapter {} ({} pages)",
+            ctx.chapter.number,
+            urls.len()
+        ));
     }
 
     pb.set_length(urls.len() as u64);
@@ -605,14 +610,19 @@ pub fn download_chapter(
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-        let comic_info = generate_comic_info(manga, chapter);
+        let comic_info = generate_comic_info(ctx.manga, ctx.chapter);
         archive.start_file("ComicInfo.xml", options)?;
         archive.write_all(comic_info.as_bytes())?;
 
         for (i, img_url) in urls.iter().enumerate() {
-            let (data, ct) =
-                fetch_single_image(client, img_url, &chapter.url, 3).with_context(|| {
-                    format!("Chapter {} page {}/{}", chapter.number, i + 1, urls.len())
+            let (data, ct) = fetch_single_image(ctx.client, img_url, &ctx.chapter.url, 3)
+                .with_context(|| {
+                    format!(
+                        "Chapter {} page {}/{}",
+                        ctx.chapter.number,
+                        i + 1,
+                        urls.len()
+                    )
                 })?;
 
             let ext = image_extension(&ct, &data, img_url);
@@ -628,13 +638,49 @@ pub fn download_chapter(
     match write_cbz() {
         Ok(_) => {
             std::fs::rename(&temp, &dest)?;
-            pb.finish_with_message(format!("Saved Chapter {}", chapter.number));
+            pb.finish_with_message(format!("Saved Chapter {}", ctx.chapter.number));
             Ok(Some(dest))
         }
         Err(e) => {
             let _ = std::fs::remove_file(&temp);
-            pb.abandon_with_message(format!("Error Chapter {}", chapter.number));
+            pb.abandon_with_message(format!("Error Chapter {}", ctx.chapter.number));
             Err(e)
+        }
+    }
+}
+
+/// Downloads a chapter with rate limiter pacing, automatic rate limit backoff retry, and success tracking.
+pub fn download_chapter_with_retry<F>(
+    ctx: &ChapterDownloadContext,
+    pb: &ProgressBar,
+    rate_limiter: &AdaptiveRateLimiter,
+    on_retry: F,
+) -> Result<Option<PathBuf>>
+where
+    F: Fn(Duration, usize, usize),
+{
+    let mut attempts = 0;
+    let max_attempts = 3;
+
+    loop {
+        attempts += 1;
+        rate_limiter.wait_for_chapter_permit();
+
+        let dl_res = download_chapter(ctx, pb);
+
+        match dl_res {
+            Ok(val) => {
+                rate_limiter.on_chapter_success();
+                return Ok(val);
+            }
+            Err(e) if is_rate_limit_error(&e) && attempts < max_attempts => {
+                let retry_after = rate_limit::extract_retry_after(&e);
+                let cooldown =
+                    rate_limiter.on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
+                on_retry(cooldown, attempts, max_attempts);
+                thread::sleep(cooldown);
+            }
+            Err(e) => return Err(e),
         }
     }
 }

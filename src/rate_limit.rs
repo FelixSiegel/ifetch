@@ -1,4 +1,4 @@
-use crate::server::helpers::lock_mutex;
+use crate::utils::lock_mutex;
 use log::{debug, info, warn};
 use std::{
     sync::{Condvar, Mutex},

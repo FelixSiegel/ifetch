@@ -24,6 +24,12 @@ pub fn handle_route(
 ) -> Result<Response<Cursor<Vec<u8>>>> {
     let path = path.strip_suffix('/').unwrap_or(path);
 
+    if path.is_empty() || path == "/health" {
+        return Ok(Response::from_string("OK").with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap(),
+        ));
+    }
+
     if path == "/api/search" {
         return search(query, state);
     }
