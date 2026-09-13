@@ -340,7 +340,6 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
     let mut last_retry_after = None;
     let mut last_err_msg = String::new();
-    let mut hit_rate_limit = false;
 
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
@@ -384,7 +383,6 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
             }
             last_err_msg = format!("HTTP {} from {} contained no image array", status, url);
         } else {
-            hit_rate_limit = true;
             last_err_msg = format!(
                 "HTTP {} ({} bytes) from {} (rate limit or down)",
                 status,
@@ -394,18 +392,14 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
         }
     }
 
-    if hit_rate_limit || last_retry_after.is_some() {
-        Err(RateLimitError::with_retry_after(
-            format!(
-                "All mirrors failed due to rate limits or challenges (last: {})",
-                last_err_msg
-            ),
-            last_retry_after,
-        )
-        .into())
-    } else {
-        bail!("All mirrors failed to provide images: {}", last_err_msg)
-    }
+    Err(RateLimitError::with_retry_after(
+        format!(
+            "All mirrors failed to provide images (last: {})",
+            last_err_msg
+        ),
+        last_retry_after,
+    )
+    .into())
 }
 
 /// Generates the `ComicInfo.xml` metadata file contents for a CBZ archive.
