@@ -340,6 +340,7 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
     let mut last_retry_after = None;
     let mut last_err_msg = String::new();
+    let mut hit_rate_limit = false;
 
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
@@ -383,6 +384,7 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
             }
             last_err_msg = format!("HTTP {} from {} contained no image array", status, url);
         } else {
+            hit_rate_limit = true;
             last_err_msg = format!(
                 "HTTP {} ({} bytes) from {} (rate limit or down)",
                 status,
@@ -392,14 +394,18 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
         }
     }
 
-    Err(RateLimitError::with_retry_after(
-        format!(
-            "All mirrors failed to provide images (last: {})",
-            last_err_msg
-        ),
-        last_retry_after,
-    )
-    .into())
+    if hit_rate_limit || last_retry_after.is_some() {
+        Err(RateLimitError::with_retry_after(
+            format!(
+                "All mirrors failed due to rate limits or challenges (last: {})",
+                last_err_msg
+            ),
+            last_retry_after,
+        )
+        .into())
+    } else {
+        bail!("All mirrors failed to provide images: {}", last_err_msg)
+    }
 }
 
 /// Generates the `ComicInfo.xml` metadata file contents for a CBZ archive.
@@ -451,12 +457,31 @@ pub fn fetch_single_image(
 
             let status = res.status();
             let retry_after = rate_limit::parse_retry_after(res.headers());
-            if !status.is_success() {
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(RateLimitError::with_retry_after(
-                    format!("HTTP {} downloading image from {}", status, img_url),
+                    format!(
+                        "Image CDN returned HTTP 429 Too Many Requests from {}",
+                        img_url
+                    ),
                     retry_after,
                 )
                 .into());
+            }
+
+            if !status.is_success() {
+                let text = res.text().unwrap_or_default();
+                if is_rate_limited_response(status, &text) {
+                    return Err(RateLimitError::with_retry_after(
+                        format!(
+                            "Image CDN challenge or block (HTTP {}) from {}",
+                            status, img_url
+                        ),
+                        retry_after,
+                    )
+                    .into());
+                }
+                bail!("HTTP error {} downloading image from {}", status, img_url);
             }
 
             let ct = res
@@ -467,11 +492,15 @@ pub fn fetch_single_image(
                 .to_string();
 
             if ct.contains("text/html") {
-                return Err(RateLimitError::with_retry_after(
-                    format!("Received HTML instead of image data from {}", img_url),
-                    retry_after,
-                )
-                .into());
+                let text = res.text().unwrap_or_default();
+                if is_rate_limited_response(status, &text) {
+                    return Err(RateLimitError::with_retry_after(
+                        format!("Image CDN returned challenge page from {}", img_url),
+                        retry_after,
+                    )
+                    .into());
+                }
+                bail!("Expected image but received HTML from {}", img_url);
             }
 
             let mut data = match res.content_length() {

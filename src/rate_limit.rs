@@ -1,5 +1,6 @@
 use crate::utils::lock_mutex;
 use log::{debug, info, warn};
+use reqwest::StatusCode;
 use std::{
     sync::{Condvar, Mutex},
     time::{Duration, Instant},
@@ -492,14 +493,28 @@ pub fn extract_retry_after(e: &anyhow::Error) -> Option<Duration> {
         .and_then(|r| r.retry_after)
 }
 
-/// Checks whether an HTTP response indicates a rate limit, anti-bot challenge, or empty block.
-pub fn is_rate_limited_response(status: reqwest::StatusCode, body: &str) -> bool {
-    !status.is_success()
-        || body.trim().is_empty()
-        || body.contains("challenge")
-        || body.contains("turnstile")
-        || body.contains("cf-chl")
-        || body.contains("Just a moment...")
+/// Checks whether an HTTP response indicates a rate limit or anti-bot challenge.
+pub fn is_rate_limited_response(status: StatusCode, body: &str) -> bool {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return true;
+    }
+
+    const CHALLENGE_MARKERS: &[&str] = &[
+        "cf-chl",
+        "challenge-platform",
+        "turnstile",
+        "Just a moment...",
+        "cf-browser-verification",
+        "cf_chl_opt",
+    ];
+
+    const STATUS_MARKERS: &[&str] = &["cloudflare", "Cloudflare", "cf-ray", "Attention Required!"];
+
+    CHALLENGE_MARKERS.iter().any(|&m| body.contains(m))
+        || (matches!(
+            status,
+            StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE
+        ) && STATUS_MARKERS.iter().any(|&m| body.contains(m)))
 }
 
 /// Checks whether an error represents an HTTP rate limit or network block.
@@ -509,9 +524,7 @@ pub fn is_rate_limit_error(e: &anyhow::Error) -> bool {
             return true;
         }
         if let Some(req_err) = cause.downcast_ref::<reqwest::Error>()
-            && (req_err.status().is_some_and(|s| !s.is_success())
-                || req_err.is_timeout()
-                || req_err.is_connect())
+            && req_err.status() == Some(StatusCode::TOO_MANY_REQUESTS)
         {
             return true;
         }
