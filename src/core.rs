@@ -338,52 +338,68 @@ pub fn select_chapters(chapters: &[Chapter], spec: &str) -> Result<Vec<Chapter>>
 
 /// Fetches image URLs for a chapter by probing MangaKatana server mirrors (`""`, `"?sv=mk"`, `"?sv=3"`).
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
+    let mut last_retry_after = None;
+    let mut last_err_msg = String::new();
+
     for suffix in ["", "?sv=mk", "?sv=3"] {
         let url = format!("{}{}", chapter_url, suffix);
         let res = match client.get(&url).send() {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("Failed request to {}: {}", url, e);
+                last_err_msg = format!("request failed: {}", e);
                 continue;
             }
         };
+
         let status = res.status();
         let retry_after = rate_limit::parse_retry_after(res.headers());
-        let text = match res.text() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        if is_rate_limited_response(status, &text) {
-            return Err(RateLimitError::with_retry_after(
-                format!(
-                    "Rate limit or anti-bot block (HTTP {}, {} bytes) from {}",
-                    status,
-                    text.len(),
-                    url
-                ),
-                retry_after,
-            )
-            .into());
+        if retry_after.is_some() {
+            last_retry_after = retry_after;
         }
 
-        if let Some(caps) = THZQ_RE.captures(&text) {
-            let array_content = caps.get(1).unwrap().as_str();
-            let mut urls = Vec::new();
-            for m in URL_RE.captures_iter(array_content) {
-                let mut u = m.get(1).unwrap().as_str().to_string();
-                if u.contains("&amp;") {
-                    u = u.replace("&amp;", "&");
+        let text = match res.text() {
+            Ok(t) => t,
+            Err(_) => {
+                last_err_msg = format!("failed reading body from {}", url);
+                continue;
+            }
+        };
+
+        if !is_rate_limited_response(status, &text) {
+            if let Some(caps) = THZQ_RE.captures(&text) {
+                let array_content = caps.get(1).unwrap().as_str();
+                let mut urls = Vec::new();
+                for m in URL_RE.captures_iter(array_content) {
+                    let mut u = m.get(1).unwrap().as_str().to_string();
+                    if u.contains("&amp;") {
+                        u = u.replace("&amp;", "&");
+                    }
+                    urls.push(u);
                 }
-                urls.push(u);
+                if !urls.is_empty() {
+                    return Ok(urls);
+                }
             }
-            if !urls.is_empty() {
-                return Ok(urls);
-            }
+            last_err_msg = format!("HTTP {} from {} contained no image array", status, url);
+        } else {
+            last_err_msg = format!(
+                "HTTP {} ({} bytes) from {} (rate limit or down)",
+                status,
+                text.len(),
+                url
+            );
         }
     }
 
-    Err(RateLimitError::new("Chapter contains no downloadable images across mirrors").into())
+    Err(RateLimitError::with_retry_after(
+        format!(
+            "All mirrors failed to provide images (last: {})",
+            last_err_msg
+        ),
+        last_retry_after,
+    )
+    .into())
 }
 
 /// Generates the `ComicInfo.xml` metadata file contents for a CBZ archive.
