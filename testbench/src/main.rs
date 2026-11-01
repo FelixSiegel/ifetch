@@ -391,12 +391,16 @@ fn print_resource_report(
         kb_to_mib(overall.hwm_kb)
     );
     println!(
-        "  • Virtual Address Space       : {:.2} MiB",
+        "  • Virtual Address Space       : {:.2} MiB (64-bit glibc per-thread allocation arenas & mappings; not physical RAM)",
         kb_to_mib(overall.vsize_max_kb)
     );
     println!(
-        "  • Server CPU Utilization      : {:.1}% avg | {:.1}% p95 | {:.1}% peak ({:.0}ms total CPU time)",
-        overall.cpu_avg_pct, overall.cpu_p95_pct, overall.cpu_max_pct, overall.cpu_time_ms
+        "  • Server CPU Utilization      : {:.1}% med (avg: {:.1}% | p95: {:.1}% | peak: {:.1}%) — {:.0}ms total CPU time",
+        overall.cpu_p50_pct,
+        overall.cpu_avg_pct,
+        overall.cpu_p95_pct,
+        overall.cpu_max_pct,
+        overall.cpu_time_ms
     );
     println!(
         "  • Server OS Threads & CtxtSw  : {}–{} threads | {} voluntary / {} non-voluntary switches",

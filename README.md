@@ -25,7 +25,7 @@ You can run it as an interactive CLI tool or as a lightweight HTTP server. When 
 - **Mihon / Tachiyomi Extension**: Seamlessly integrate your self-hosted library into Mihon with the [ifetch-extension](https://github.com/FelixSiegel/ifetch-extension).
 - **Adaptive Rate Limiting**: Built-in pacing and Cloudflare challenge detection with burst allowances for immediate reading and exponential cooldown backoff.
 - **Automated Library Updates**: Periodic cron checks automatically fetch newly released chapters for tracked manga with exponential backoff for finished series.
-- **Minimal Resource Footprint**: Consumes ~2-20 MB RAM at idle or during basic navigation, peaking around ~70 MB during active reading via a bounded LRU image cache.
+- **Minimal Resource Footprint**: Consumes ~10 MB RAM at idle or during regular browsing, maintaining a median usage of ~15 MB and peaking around ~100-120 MB under heavy concurrent image prefetching and multi-stream LRU eviction.
 - **Discord Webhooks**: Optional progress, completion, and error notifications.
 
 ## Installation

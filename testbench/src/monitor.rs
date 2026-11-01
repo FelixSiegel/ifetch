@@ -30,6 +30,7 @@ pub struct ResourceStats {
     pub duration: Duration,
     pub sample_count: usize,
     pub cpu_avg_pct: f64,
+    pub cpu_p50_pct: f64,
     pub cpu_p95_pct: f64,
     pub cpu_max_pct: f64,
     pub cpu_time_ms: f64,
@@ -273,6 +274,7 @@ fn compute_stats(phase_name: &str, duration: Duration, samples: &[ProcSample]) -
             duration,
             sample_count: 0,
             cpu_avg_pct: 0.0,
+            cpu_p50_pct: 0.0,
             cpu_p95_pct: 0.0,
             cpu_max_pct: 0.0,
             cpu_time_ms: 0.0,
@@ -304,7 +306,9 @@ fn compute_stats(phase_name: &str, duration: Duration, samples: &[ProcSample]) -
 
     let mut cpu_vals: Vec<f64> = samples.iter().map(|s| s.cpu_percent).collect();
     cpu_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50_idx = ((cpu_vals.len() as f64 * 0.50) as usize).min(cpu_vals.len() - 1);
     let p95_idx = ((cpu_vals.len() as f64 * 0.95) as usize).min(cpu_vals.len() - 1);
+    let cpu_p50_pct = cpu_vals[p50_idx];
     let cpu_p95_pct = cpu_vals[p95_idx].max(cpu_avg_pct);
     let cpu_max_pct = cpu_vals.last().copied().unwrap_or(0.0).max(cpu_avg_pct);
 
@@ -332,6 +336,7 @@ fn compute_stats(phase_name: &str, duration: Duration, samples: &[ProcSample]) -
         duration,
         sample_count: samples.len(),
         cpu_avg_pct,
+        cpu_p50_pct,
         cpu_p95_pct,
         cpu_max_pct,
         cpu_time_ms,
