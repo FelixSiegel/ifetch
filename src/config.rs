@@ -1,5 +1,12 @@
 use std::{env::var, sync::LazyLock};
 
+pub static BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    var("IFETCH_BASE_URL")
+        .unwrap_or_else(|_| "https://mangakatana.com".to_string())
+        .trim_end_matches('/')
+        .to_string()
+});
+
 pub static CRON_HOURS: LazyLock<i64> = LazyLock::new(|| {
     var("IFETCH_CRON_HOURS")
         .unwrap_or_else(|_| "12".to_string())

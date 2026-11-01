@@ -45,8 +45,6 @@ static AUTHORS_SEL: LazyLock<Selector> =
 static ALT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".alt_name").unwrap());
 static ANCHOR_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 
-const BASE_URL: &str = "https://mangakatana.com/";
-
 /// Extracts and normalizes text content from a parsed HTML element.
 fn element_text(el: &scraper::ElementRef) -> String {
     el.text().collect::<Vec<_>>().join(" ").trim().to_string()
@@ -72,8 +70,9 @@ pub fn build_client() -> Result<Client> {
 ///
 /// Returns a list of matching `Manga` entries, or an error if rate-limited or unavailable.
 pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
+    let base_url = format!("{}/", *crate::config::BASE_URL);
     let res = client
-        .get(Url::parse_with_params(BASE_URL, &[("search", query)])?)
+        .get(Url::parse_with_params(&base_url, &[("search", query)])?)
         .send()?;
     let status = res.status();
     let url = res.url().clone();
@@ -127,7 +126,7 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
     let mut results = Vec::new();
     let mut seen = HashSet::new();
-    let base_url_parsed = Url::parse(BASE_URL)?;
+    let base_url_parsed = Url::parse(&base_url)?;
 
     for item in doc.select(&ITEM_SEL) {
         if let Some(anchor) = item.select(&TITLE_SEL).next()
@@ -252,7 +251,9 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     };
 
     let mut chapters = Vec::new();
-    let base_url_parsed = Url::parse(BASE_URL)?;
+    let base_url = format!("{}/", *crate::config::BASE_URL);
+    let base_url_parsed = Url::parse(&base_url)?;
+    let manga_path = Url::parse(url)?.path().trim_end_matches('/').to_string();
 
     for anchor in doc.select(&ANCHOR_SEL) {
         if let Some(href) = anchor.value().attr("href")
@@ -262,7 +263,7 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
             if let Some(caps) = CHAPTER_RE.captures(p)
                 && caps
                     .get(1)
-                    .is_some_and(|m| m.as_str().ends_with(manga_path))
+                    .is_some_and(|m| m.as_str().ends_with(&manga_path))
             {
                 let num_str = caps.get(2).map_or("", |m| m.as_str());
                 if let Ok(num) = Decimal::from_str_exact(num_str) {

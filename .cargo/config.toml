@@ -1,0 +1,2 @@
+[alias]
+testbench = "run --release --offline --manifest-path testbench/Cargo.toml --target-dir target --"

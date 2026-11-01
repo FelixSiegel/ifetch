@@ -21,8 +21,10 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     let parsed = Url::parse(value)?;
+    let configured_base = Url::parse(&format!("{}/", *crate::config::BASE_URL))?;
     if parsed.host_str() != Some("mangakatana.com")
         && parsed.host_str() != Some("www.mangakatana.com")
+        && parsed.host_str() != configured_base.host_str()
     {
         bail!("URL must belong to mangakatana.com");
     }
@@ -41,8 +43,7 @@ pub fn series_url(value: &str) -> Result<Option<String>> {
         bail!("Expected MangaKatana manga or chapter URL");
     }
 
-    let base = Url::parse("https://mangakatana.com/")?;
-    Ok(Some(base.join(path)?.to_string()))
+    Ok(Some(configured_base.join(path)?.to_string()))
 }
 
 /// Acquires a lock on a mutex, recovering gracefully if another thread panicked while holding it.

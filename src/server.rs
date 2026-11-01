@@ -43,8 +43,13 @@ pub fn run_server(
 
     let server = Server::http(format!("0.0.0.0:{}", port))
         .map_err(|e| anyhow::anyhow!("Failed to bind server to 0.0.0.0:{}: {}", port, e))?;
+    let bound_port = server
+        .server_addr()
+        .to_ip()
+        .map(|a| a.port())
+        .unwrap_or(port);
     let server = Arc::new(server);
-    info!("Server running on http://0.0.0.0:{}", port);
+    info!("Server running on http://0.0.0.0:{}", bound_port);
 
     let client = Arc::new(core::build_client()?);
 
@@ -184,7 +189,7 @@ fn run_cron(state: &Arc<AppState>) {
 
             for manga_chk in mangas_to_check {
                 sleep(Duration::from_secs(2));
-                let url = format!("https://mangakatana.com/manga/{}", manga_chk.id);
+                let url = format!("{}/manga/{}", *crate::config::BASE_URL, manga_chk.id);
                 match manga_chapters(&state.client, &url) {
                     Ok((manga, chapters)) => {
                         let folder = get_folder_name(&manga.title);

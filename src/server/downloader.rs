@@ -163,7 +163,7 @@ pub fn queue_background_download(
         let (manga, chapters) = match preloaded {
             Some(data) => data,
             None => {
-                let url = format!("https://mangakatana.com/manga/{}", id);
+                let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
                 match manga_chapters(&state.client, &url) {
                     Ok(data) => data,
                     Err(e) => {
@@ -182,7 +182,7 @@ pub fn queue_background_download(
             }
         };
 
-        let url = format!("https://mangakatana.com/manga/{}", id);
+        let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
         let folder_name = get_folder_name(&manga.title);
         let manga_output_dir = state.output_dir.join(&folder_name);
 

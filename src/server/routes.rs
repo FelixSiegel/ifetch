@@ -71,7 +71,7 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let url = format!("https://mangakatana.com/manga/{}", id);
+    let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
     let (manga, chapters) = manga_chapters(&state.client, &url)?;
 
     let folder = get_folder_name(&manga.title);
@@ -102,7 +102,7 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let url = format!("https://mangakatana.com/manga/{}", id);
+    let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
     let (manga, chapters) = manga_chapters(&state.client, &url)?;
 
     let folder = get_folder_name(&manga.title);
