@@ -1,6 +1,17 @@
 use reqwest::StatusCode;
 use std::time::Duration;
 
+const CHALLENGE_MARKERS: &[&str] = &[
+    "cf-chl",
+    "challenge-platform",
+    "turnstile",
+    "Just a moment...",
+    "cf-browser-verification",
+    "cf_chl_opt",
+];
+
+const STATUS_MARKERS: &[&str] = &["cloudflare", "Cloudflare", "cf-ray", "Attention Required!"];
+
 /// Typed error representing an HTTP rate limit or anti-bot block.
 #[derive(Debug, Clone)]
 pub struct RateLimitError {
@@ -54,17 +65,6 @@ pub fn is_rate_limited_response(status: StatusCode, body: &str) -> bool {
         return true;
     }
 
-    const CHALLENGE_MARKERS: &[&str] = &[
-        "cf-chl",
-        "challenge-platform",
-        "turnstile",
-        "Just a moment...",
-        "cf-browser-verification",
-        "cf_chl_opt",
-    ];
-
-    const STATUS_MARKERS: &[&str] = &["cloudflare", "Cloudflare", "cf-ray", "Attention Required!"];
-
     CHALLENGE_MARKERS.iter().any(|&m| body.contains(m))
         || (matches!(
             status,
@@ -72,17 +72,12 @@ pub fn is_rate_limited_response(status: StatusCode, body: &str) -> bool {
         ) && STATUS_MARKERS.iter().any(|&m| body.contains(m)))
 }
 
+#[rustfmt::skip]
 /// Checks whether an error represents an HTTP rate limit or network block.
 pub fn is_rate_limit_error(e: &anyhow::Error) -> bool {
-    for cause in e.chain() {
-        if cause.downcast_ref::<RateLimitError>().is_some() {
-            return true;
-        }
-        if let Some(req_err) = cause.downcast_ref::<reqwest::Error>()
-            && req_err.status() == Some(StatusCode::TOO_MANY_REQUESTS)
-        {
-            return true;
-        }
-    }
-    false
+    e.chain().any(|cause| {
+        cause.downcast_ref::<RateLimitError>().is_some() ||
+        cause.downcast_ref::<reqwest::Error>().is_some_and(
+            |req_err| req_err.status() == Some(StatusCode::TOO_MANY_REQUESTS))
+    })
 }
