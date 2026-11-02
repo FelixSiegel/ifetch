@@ -2,7 +2,6 @@ use crate::{
     models::{Chapter, Manga},
     utils::escape_xml,
 };
-use anyhow::Result;
 use std::{fs::File, path::Path};
 
 /// Generates the `ComicInfo.xml` metadata file contents for a CBZ archive.
@@ -30,10 +29,11 @@ pub fn generate_comic_info(manga: &Manga, chapter: &Chapter) -> String {
 
 /// Verifies whether an existing CBZ file matches the expected page count (including ComicInfo.xml).
 pub fn is_chapter_up_to_date(dest: &Path, expected_page_count: usize) -> bool {
-    (|| -> Result<bool> {
-        let file = File::open(dest)?;
-        let archive = zip::ZipArchive::new(file)?;
-        Ok(archive.len() == expected_page_count + 1)
-    })()
-    .unwrap_or(false)
+    let Ok(file) = File::open(dest) else {
+        return false;
+    };
+    let Ok(archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    archive.len() == expected_page_count + 1
 }

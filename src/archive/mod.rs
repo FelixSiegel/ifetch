@@ -87,16 +87,12 @@ pub fn download_chapter_with_retry<F>(
 where
     F: Fn(Duration, usize, usize),
 {
-    let mut attempts = 0;
-    let max_attempts = 3;
+    const MAX_ATTEMPTS: usize = 3;
 
-    loop {
-        attempts += 1;
+    for attempt in 1..=MAX_ATTEMPTS {
         rate_limiter.wait_for_chapter_permit();
 
-        let dl_res = download_chapter(ctx, pb);
-
-        match dl_res {
+        match download_chapter(ctx, pb) {
             Ok(val) => {
                 rate_limiter.on_chapter_success();
                 return Ok(val);
@@ -105,8 +101,8 @@ where
                 let retry_after = rate_limit::extract_retry_after(&e);
                 let cooldown =
                     rate_limiter.on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
-                if attempts < max_attempts {
-                    on_retry(cooldown, attempts, max_attempts);
+                if attempt < MAX_ATTEMPTS {
+                    on_retry(cooldown, attempt, MAX_ATTEMPTS);
                 } else {
                     return Err(e);
                 }
@@ -114,4 +110,6 @@ where
             Err(e) => return Err(e),
         }
     }
+
+    unreachable!()
 }
