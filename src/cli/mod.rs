@@ -1,3 +1,6 @@
+pub mod selector;
+pub use selector::select_chapters;
+
 use crate::models::Manga;
 use anyhow::{Result, bail};
 use clap::Parser;

@@ -1,8 +1,9 @@
 use crate::{
-    core::{self, manga_chapters},
+    archive::{ChapterDownloadContext, download_chapter_with_retry},
     db::{CheckTrigger, upsert_manga},
     discord::{NotificationType, send_webhook},
     models::{Chapter, Manga},
+    scraper::manga_chapters,
     server::{helpers::lock_mutex, state::AppState},
     utils::{get_folder_name, scan_manga_chapters, truncate_str},
 };
@@ -253,7 +254,7 @@ pub fn queue_background_download(
                 };
 
                 let pb = indicatif::ProgressBar::hidden();
-                let ctx = core::ChapterDownloadContext {
+                let ctx = ChapterDownloadContext {
                     client: &state.client,
                     manga: &tracker.manga,
                     chapter: &chapter,
@@ -262,7 +263,7 @@ pub fn queue_background_download(
                     verify: false,
                 };
 
-                let res = core::download_chapter_with_retry(
+                let res = download_chapter_with_retry(
                     &ctx,
                     &pb,
                     &state.rate_limiter,

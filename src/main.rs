@@ -1,12 +1,13 @@
-mod cli;
-mod config;
-mod core;
-mod db;
-mod discord;
-mod models;
+pub mod archive;
+pub mod cli;
+pub mod config;
+pub mod db;
+pub mod discord;
+pub mod models;
 pub mod rate_limit;
-mod server;
-mod utils;
+pub mod scraper;
+pub mod server;
+pub mod utils;
 
 use crate::cli::Cli;
 use crate::rate_limit::AdaptiveRateLimiter;
@@ -37,15 +38,15 @@ fn run() -> anyhow::Result<()> {
         None => cli::prompt_manga()?,
     };
 
-    let client = core::build_client()?;
+    let client = scraper::build_client()?;
 
     let direct_url = utils::series_url(&query)?;
     let (manga, chapters) = if let Some(url) = direct_url {
-        core::manga_chapters(&client, &url)?
+        scraper::manga_chapters(&client, &url)?
     } else {
-        let results = core::search_manga(&client, &query)?;
+        let results = scraper::search_manga(&client, &query)?;
         let selected = cli::choose_manga(&results)?;
-        core::manga_chapters(&client, &selected.url)?
+        scraper::manga_chapters(&client, &selected.url)?
     };
 
     use console::style;
@@ -79,7 +80,7 @@ fn run() -> anyhow::Result<()> {
         None => cli::prompt_chapters()?,
     };
 
-    let chosen = core::select_chapters(&chapters, &spec)?;
+    let chosen = cli::select_chapters(&chapters, &spec)?;
 
     let folder_name = crate::utils::get_folder_name(&manga.title);
     let manga_output_dir = args.output.join(folder_name);
@@ -113,7 +114,7 @@ fn run() -> anyhow::Result<()> {
                     let pb = m.add(ProgressBar::new(0));
                     pb.set_style(style.clone());
 
-                    let ctx = core::ChapterDownloadContext {
+                    let ctx = archive::ChapterDownloadContext {
                         client: &client,
                         manga: &manga,
                         chapter,
@@ -122,7 +123,7 @@ fn run() -> anyhow::Result<()> {
                         verify: args.verify,
                     };
 
-                    let res = core::download_chapter_with_retry(
+                    let res = archive::download_chapter_with_retry(
                         &ctx,
                         &pb,
                         &rate_limiter,

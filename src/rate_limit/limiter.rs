@@ -1,6 +1,5 @@
 use crate::utils::lock_mutex;
 use log::{debug, info, warn};
-use reqwest::StatusCode;
 use std::{
     sync::{Condvar, Mutex},
     time::{Duration, Instant},
@@ -99,28 +98,14 @@ fn expire_cooldown_if_needed(inner: &mut RateLimiterInner, now: Instant) -> bool
         // Set to `until` (cooldown expiration instant) so true post-cooldown idle time
         // is measured accurately without stalling an extra 15s or causing clock skew.
         inner.last_permit_granted_at = until;
-        info!("Rate limit cooldown expired. Resuming chapter downloads.");
+        info!("Rate limit cooldown expired. Resuming operations.");
         return true;
     }
     false
 }
 
-/// Scope guard to ensure `reserved_permits` is decremented even if a thread panics
-/// while waiting or holding a reservation.
-struct PermitGuard<'a> {
-    inner: &'a Mutex<RateLimiterInner>,
-    active: bool,
-}
-
-impl<'a> Drop for PermitGuard<'a> {
-    fn drop(&mut self) {
-        if self.active {
-            let mut inner = lock_mutex(self.inner);
-            inner.reserved_permits = inner.reserved_permits.saturating_sub(1);
-        }
-    }
-}
-
+/// Dynamic, thread-safe rate limiter balancing fast burst downloads for single chapter reading
+/// with adaptive paced delays and automatic cooldown backoff for bulk downloads.
 pub struct AdaptiveRateLimiter {
     inner: Mutex<RateLimiterInner>,
     cvar: Condvar,
@@ -139,7 +124,7 @@ impl AdaptiveRateLimiter {
             inner: Mutex::new(RateLimiterInner {
                 burst_tokens: BURST_CAPACITY,
                 reserved_permits: 0,
-                last_permit_granted_at: now - Duration::from_secs(BURST_REPLENISH_IDLE_SECS + 1),
+                last_permit_granted_at: now,
                 next_permit_at: now,
                 cooldown_until: None,
                 current_delay: Duration::from_millis(BASE_DELAY_MS),
@@ -161,77 +146,62 @@ impl AdaptiveRateLimiter {
         }
     }
 
-    /// Called before starting each chapter download.
-    /// Manages burst permits, inter-chapter delays, and pauses during cooldown.
+    /// Blocks until a permit is granted to start downloading a chapter.
     ///
-    /// # Invariants
-    /// 1. `last_permit_granted_at` is updated and permit counters are incremented ONLY when
-    ///    a chapter permit is actually granted.
-    /// 2. `reserved_permits` strictly tracks threads waiting for paced permits.
-    /// 3. Idleness means no queued permit reservations (`reserved_permits == 0`),
-    ///    the pacing schedule has caught up (`now >= next_permit_at`),
-    ///    no rate-limit cooldown is active, and no permit has been granted for at least `BURST_REPLENISH_IDLE_SECS`.
-    /// 4. The mutex lock is retained across condition evaluation and handed directly to `Condvar::wait_timeout`.
-    ///    Any change in schedule timeline increments `schedule_generation` and notifies waiting threads.
+    /// 1. If currently in a cooldown, waits until the cooldown period expires.
+    /// 2. If idle for $\ge 15\text{s}$, replenishes zero-delay burst tokens (up to 10).
+    /// 3. If burst tokens are available and no worker threads are queued, grants immediate zero-delay execution.
+    /// 4. Once burst tokens are exhausted, schedules permits consecutively at `current_delay` intervals.
     pub fn wait_for_chapter_permit(&self) {
         let mut inner = lock_mutex(&self.inner);
 
         loop {
             let now = Instant::now();
+            let _ = expire_cooldown_if_needed(&mut inner, now);
 
-            // Centralized cooldown expiration check
-            if expire_cooldown_if_needed(&mut inner, now) {
-                self.cvar.notify_all();
-            }
-
+            // Active cooldown: sleep until expiration or until woken up by notify_all()
             if let Some(until) = inner.cooldown_until {
-                let sleep_dur = until.saturating_duration_since(now);
-                let (guard, _) = self
-                    .cvar
-                    .wait_timeout(inner, sleep_dur)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                inner = guard;
-                continue;
+                if now < until {
+                    let wait_dur = until.saturating_duration_since(now);
+                    let (new_inner, _) = self
+                        .cvar
+                        .wait_timeout(inner, wait_dur)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    inner = new_inner;
+                    continue;
+                }
+                let _ = expire_cooldown_if_needed(&mut inner, Instant::now());
             }
 
-            // Baseline recovery check: if 5 minutes elapsed without any rate limit blocks,
-            // return delay and cooldown to initial baseline.
-            if inner
-                .last_block_at
-                .is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_secs(300))
-            {
-                inner.current_cooldown = Duration::from_secs(BASE_COOLDOWN_SECS);
-                inner.current_delay = Duration::from_millis(BASE_DELAY_MS);
-                inner.last_block_at = None;
-                info!(
-                    "Rate limiter fully recovered to baseline delay and cooldown after 5 minutes of stability."
-                );
-            }
+            let now = Instant::now();
 
-            // Idle replenishment check:
-            // Limiter is idle when no threads are waiting on reservations, schedule has elapsed,
-            // and wall-clock duration since the last granted permit exceeds `BURST_REPLENISH_IDLE_SECS`.
+            // Replenish burst tokens if idle for >= 15s and no reserved permits are queued
             if inner.reserved_permits == 0
-                && now >= inner.next_permit_at
                 && now.saturating_duration_since(inner.last_permit_granted_at)
                     >= Duration::from_secs(BURST_REPLENISH_IDLE_SECS)
             {
                 if inner.burst_tokens < BURST_CAPACITY {
                     debug!(
-                        "Downloader was idle for {:?}. Replenished burst tokens to {}",
-                        now.saturating_duration_since(inner.last_permit_granted_at),
-                        BURST_CAPACITY
+                        "Replenishing burst tokens from {} to {} (idle for >= {}s)",
+                        inner.burst_tokens, BURST_CAPACITY, BURST_REPLENISH_IDLE_SECS
                     );
+                    inner.burst_tokens = BURST_CAPACITY;
+                    inner.burst_permits_since_reset = 0;
+                    inner.total_permits_since_reset = 0;
+                    inner.next_permit_at = now;
+                    inner.schedule_generation = inner.schedule_generation.wrapping_add(1);
                 }
-                inner.burst_tokens = BURST_CAPACITY;
-                inner.burst_permits_since_reset = 0;
-                inner.total_permits_since_reset = 0;
-                inner.next_permit_at = now;
-                inner.schedule_generation = inner.schedule_generation.wrapping_add(1);
+
+                // If no blocks have occurred for > 10 minutes, gradually restore cooldown baseline
+                if let Some(last_block) = inner.last_block_at
+                    && now.saturating_duration_since(last_block) > Duration::from_secs(600)
+                {
+                    inner.current_cooldown = Duration::from_secs(BASE_COOLDOWN_SECS);
+                }
             }
 
-            // Burst permit: granted immediately with 0 delay
-            if inner.burst_tokens > 0 {
+            // Path 1: Fast zero-delay burst token available
+            if inner.burst_tokens > 0 && inner.reserved_permits == 0 {
                 inner.burst_tokens -= 1;
                 inner.burst_permits_since_reset += 1;
                 inner.total_permits_since_reset += 1;
@@ -239,100 +209,84 @@ impl AdaptiveRateLimiter {
                     .max_burst_achieved
                     .max(inner.burst_permits_since_reset);
                 inner.last_permit_granted_at = now;
-                inner.next_permit_at = inner.next_permit_at.max(now);
-                debug!(
-                    "Burst token granted ({} remaining in burst)",
-                    inner.burst_tokens
-                );
+                inner.next_permit_at = now;
                 return;
             }
 
-            // Paced permit: calculate next scheduled slot authoritative to this thread
-            let slot = inner.next_permit_at.max(now);
-            let scheduled_time = slot
-                .checked_add(inner.current_delay)
-                .expect("rate limiter schedule timeline overflowed Instant representable range");
-            inner.next_permit_at = scheduled_time;
+            // Path 2: Scheduled pacing
+            let scheduled_at = if inner.next_permit_at <= now {
+                now + inner.current_delay
+            } else {
+                inner.next_permit_at + inner.current_delay
+            };
+            inner.next_permit_at = scheduled_at;
             inner.reserved_permits += 1;
 
-            let my_gen = inner.schedule_generation;
+            let my_generation = inner.schedule_generation;
 
-            // Arm scope guard for panic safety
-            let mut guard_tracker = PermitGuard {
-                inner: &self.inner,
-                active: true,
-            };
+            while Instant::now() < scheduled_at {
+                let wait_rem = scheduled_at.saturating_duration_since(Instant::now());
+                if wait_rem.is_zero() {
+                    break;
+                }
 
-            // Wait on condvar while holding the lock; handle spurious wakeups
-            let mut guard = inner;
-            while let Some(wait_dur) = slot.checked_duration_since(Instant::now()) {
-                let (g, _) = self
+                let (new_inner, _) = self
                     .cvar
-                    .wait_timeout(guard, wait_dur)
-                    .unwrap_or_else(|p| p.into_inner());
-                guard = g;
-                if guard.schedule_generation != my_gen || guard.cooldown_until.is_some() {
+                    .wait_timeout(inner, wait_rem)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                inner = new_inner;
+
+                // If schedule generation changed (e.g. rate limit hit or cooldown started),
+                // our scheduled slot is invalidated; decrement reserved permit and re-evaluate
+                if inner.schedule_generation != my_generation {
+                    inner.reserved_permits = inner.reserved_permits.saturating_sub(1);
                     break;
                 }
             }
 
-            guard.reserved_permits = guard.reserved_permits.saturating_sub(1);
-            guard_tracker.active = false;
-
-            // Verify that the schedule generation that granted this reservation is still authoritative
-            // and no new cooldown was triggered while waiting
-            if guard.schedule_generation != my_gen || guard.cooldown_until.is_some() {
-                inner = guard;
-                continue;
+            if inner.schedule_generation == my_generation {
+                inner.reserved_permits = inner.reserved_permits.saturating_sub(1);
+                let grant_now = Instant::now();
+                inner.last_permit_granted_at = grant_now;
+                inner.total_permits_since_reset += 1;
+                return;
             }
-
-            let finish_now = Instant::now();
-            guard.last_permit_granted_at = finish_now;
-            guard.total_permits_since_reset += 1;
-            return;
         }
     }
 
-    /// Called when a chapter download succeeds.
-    /// Updates statistics and gradually relaxes the inter-chapter delay via AIMD.
+    /// Records a successful chapter download.
+    ///
+    /// Slices adaptive delay back toward `BASE_DELAY_MS` every 20 consecutive successes.
     pub fn on_chapter_success(&self) {
         let mut inner = lock_mutex(&self.inner);
         inner.total_successful_chapters += 1;
         inner.consecutive_successes += 1;
 
-        // AIMD: Multiplicative decrease of excess delay above baseline every 20 successful chapters
         if inner.consecutive_successes >= CONSECUTIVE_SUCCESS_RELAX {
             inner.consecutive_successes = 0;
-            let min_delay = Duration::from_millis(BASE_DELAY_MS);
-            if inner.current_delay > min_delay {
-                let excess = inner.current_delay.saturating_sub(min_delay);
-                let step = (excess / 4).max(Duration::from_millis(DELAY_STEP_DOWN_MS));
-                inner.current_delay = inner.current_delay.saturating_sub(step).max(min_delay);
+            let current_ms = inner.current_delay.as_millis() as u64;
+            if current_ms > BASE_DELAY_MS {
+                let excess = current_ms.saturating_sub(BASE_DELAY_MS);
+                let reduction = (excess / 4).max(DELAY_STEP_DOWN_MS);
+                let new_ms = current_ms.saturating_sub(reduction).max(BASE_DELAY_MS);
+                inner.current_delay = Duration::from_millis(new_ms);
                 debug!(
-                    "Relaxed adaptive chapter delay to {:?}",
+                    "Adaptive rate limiter relaxed delay to {:?} after sustained success",
                     inner.current_delay
                 );
-            }
-
-            // Also gradually relax escalated cooldown towards BASE_COOLDOWN_SECS on sustained success
-            let base_cooldown = Duration::from_secs(BASE_COOLDOWN_SECS);
-            if inner.current_cooldown > base_cooldown {
-                inner.current_cooldown = inner
-                    .current_cooldown
-                    .saturating_sub(Duration::from_secs(10))
-                    .max(base_cooldown);
             }
         }
     }
 
-    /// Called when a rate limit or Cloudflare challenge is encountered.
-    /// Activates a synchronized cooldown, increases the inter-chapter delay,
-    /// and records empirical statistics on limits.
+    /// Convenience wrapper for `on_rate_limit_hit_with_retry` without an explicit `Retry-After` duration.
     pub fn on_rate_limit_hit(&self, reason: &str) -> Duration {
         self.on_rate_limit_hit_with_retry(reason, None)
     }
 
-    /// Called when a rate limit or Cloudflare challenge is encountered, optionally with a Retry-After duration.
+    /// Records a rate limit or anti-bot block.
+    ///
+    /// Enters a cooldown period, resets burst tokens, steps up the adaptive pacing delay (+150ms),
+    /// and wakes all queued worker threads.
     pub fn on_rate_limit_hit_with_retry(
         &self,
         reason: &str,
@@ -341,12 +295,13 @@ impl AdaptiveRateLimiter {
         let mut inner = lock_mutex(&self.inner);
         let now = Instant::now();
 
-        if expire_cooldown_if_needed(&mut inner, now) {
-            self.cvar.notify_all();
-        }
+        // Expire any existing cooldown if its time has elapsed
+        let _ = expire_cooldown_if_needed(&mut inner, now);
 
-        // If already in an active cooldown, do not escalate penalties; return remaining duration
-        if let Some(until) = inner.cooldown_until {
+        // If already in an active cooldown that hasn't expired yet, do not re-escalate cooldown or delay
+        if let Some(until) = inner.cooldown_until
+            && now < until
+        {
             debug!(
                 "Concurrent rate limit hit detected (reason: {}). Already in active cooldown, skipping duplicate escalation.",
                 reason
@@ -444,90 +399,4 @@ impl AdaptiveRateLimiter {
             current_cooldown_secs: inner.current_cooldown.as_secs(),
         }
     }
-}
-
-/// Typed error representing an HTTP rate limit or anti-bot block.
-#[derive(Debug, Clone)]
-pub struct RateLimitError {
-    pub reason: String,
-    pub retry_after: Option<Duration>,
-}
-
-impl RateLimitError {
-    pub fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-            retry_after: None,
-        }
-    }
-
-    pub fn with_retry_after(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
-        Self {
-            reason: reason.into(),
-            retry_after,
-        }
-    }
-}
-
-impl std::fmt::Display for RateLimitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.reason)
-    }
-}
-
-impl std::error::Error for RateLimitError {}
-
-/// Parses the standard HTTP `Retry-After` header (in seconds) if present in response headers.
-pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-}
-
-/// Extracts an explicit `Retry-After` duration if present in the error chain.
-pub fn extract_retry_after(e: &anyhow::Error) -> Option<Duration> {
-    e.chain()
-        .find_map(|c| c.downcast_ref::<RateLimitError>())
-        .and_then(|r| r.retry_after)
-}
-
-/// Checks whether an HTTP response indicates a rate limit or anti-bot challenge.
-pub fn is_rate_limited_response(status: StatusCode, body: &str) -> bool {
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        return true;
-    }
-
-    const CHALLENGE_MARKERS: &[&str] = &[
-        "cf-chl",
-        "challenge-platform",
-        "turnstile",
-        "Just a moment...",
-        "cf-browser-verification",
-        "cf_chl_opt",
-    ];
-
-    const STATUS_MARKERS: &[&str] = &["cloudflare", "Cloudflare", "cf-ray", "Attention Required!"];
-
-    CHALLENGE_MARKERS.iter().any(|&m| body.contains(m))
-        || (matches!(
-            status,
-            StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE
-        ) && STATUS_MARKERS.iter().any(|&m| body.contains(m)))
-}
-
-/// Checks whether an error represents an HTTP rate limit or network block.
-pub fn is_rate_limit_error(e: &anyhow::Error) -> bool {
-    for cause in e.chain() {
-        if cause.downcast_ref::<RateLimitError>().is_some() {
-            return true;
-        }
-        if let Some(req_err) = cause.downcast_ref::<reqwest::Error>()
-            && req_err.status() == Some(StatusCode::TOO_MANY_REQUESTS)
-        {
-            return true;
-        }
-    }
-    false
 }

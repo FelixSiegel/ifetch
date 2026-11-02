@@ -1,6 +1,6 @@
 use crate::{
-    core::{self, manga_chapters},
     db::{CheckTrigger, get_manga_title, upsert_manga},
+    scraper::{manga_chapters, search_manga},
     server::{
         downloader::queue_background_download,
         helpers::{
@@ -60,7 +60,7 @@ fn search(query: &HashMap<String, String>, state: &AppState) -> Result<Response<
         return Ok(bad_request("Missing q"));
     };
 
-    let results = core::search_manga(&state.client, q)?;
+    let results = search_manga(&state.client, q)?;
     json_response(&results)
 }
 

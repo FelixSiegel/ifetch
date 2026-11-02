@@ -1,22 +1,18 @@
 pub mod cache;
+pub mod cron;
 pub mod downloader;
 pub mod helpers;
 pub mod routes;
 pub mod state;
 
 use crate::{
-    config::CRON_HOURS,
-    core::{self, manga_chapters},
-    db::{CheckTrigger, check_version_update, get_mangas_to_check, init_db, upsert_manga},
+    db::{check_version_update, init_db},
     rate_limit::AdaptiveRateLimiter,
+    scraper,
     server::{
-        cache::ServerCache,
-        downloader::{DownloadPool, queue_background_download},
-        helpers::lock_mutex,
-        routes::handle_route,
+        cache::ServerCache, cron::run_cron, downloader::DownloadPool, routes::handle_route,
         state::AppState,
     },
-    utils::get_folder_name,
 };
 use log::{error, info, warn};
 use std::{
@@ -24,8 +20,7 @@ use std::{
     panic::{self, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex},
-    thread::{sleep, spawn},
-    time::Duration,
+    thread::spawn,
 };
 use tiny_http::{Response, Server};
 use url::Url;
@@ -51,7 +46,7 @@ pub fn run_server(
     let server = Arc::new(server);
     info!("Server running on http://0.0.0.0:{}", bound_port);
 
-    let client = Arc::new(core::build_client()?);
+    let client = Arc::new(scraper::build_client()?);
 
     let db_path = config_dir.join("library.db");
     let conn = init_db(&db_path).map_err(|e| {
@@ -168,67 +163,4 @@ pub fn run_server(
     }
 
     Ok(())
-}
-
-/// Periodic background task that checks for new chapters of stored mangas and queues downloads.
-fn run_cron(state: &Arc<AppState>) {
-    if *CRON_HOURS <= 0 {
-        info!("IFETCH_CRON_HOURS is <= 0. Auto-updates disabled.");
-        return;
-    }
-
-    sleep(Duration::from_secs(60));
-
-    loop {
-        let cron_cycle = catch_unwind(panic::AssertUnwindSafe(|| {
-            info!("Starting periodic auto-update cron job...");
-            let mangas_to_check = {
-                let conn = lock_mutex(&state.db);
-                get_mangas_to_check(&conn).unwrap_or_default()
-            };
-
-            for manga_chk in mangas_to_check {
-                sleep(Duration::from_secs(2));
-                let url = format!("{}/manga/{}", *crate::config::BASE_URL, manga_chk.id);
-                match manga_chapters(&state.client, &url) {
-                    Ok((manga, chapters)) => {
-                        let folder = get_folder_name(&manga.title);
-                        let manga_dir = state.output_dir.join(&folder);
-                        let (_, existing, missing) =
-                            crate::utils::scan_manga_chapters(&manga_dir, &manga.title, &chapters);
-                        let local_count = existing.len();
-                        let did_update = !missing.is_empty();
-                        let _ = upsert_manga(
-                            &lock_mutex(&state.db),
-                            &manga_chk.id,
-                            &manga.title,
-                            &manga.status,
-                            chapters.len(),
-                            Some(local_count),
-                            CheckTrigger::Cron {
-                                new_chapters: did_update,
-                            },
-                        );
-
-                        if did_update {
-                            queue_background_download(
-                                &manga_chk.id,
-                                state,
-                                Some((manga, chapters)),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Auto-update check failed for {}: {}", manga_chk.id, e);
-                    }
-                }
-            }
-        }));
-
-        if let Err(e) = cron_cycle {
-            error!("Cron cycle encountered panic: {:?}", e);
-        }
-
-        sleep(Duration::from_secs(3600));
-    }
 }
