@@ -23,12 +23,15 @@ pub fn build_client() -> Result<Client> {
         .context("Failed to build HTTP client")
 }
 
+/// Mirror query suffixes probed sequentially on MangaKatana.
+const MIRROR_SUFFIXES: [&str; 3] = ["", "?sv=mk", "?sv=3"];
+
 /// Fetches image URLs for a chapter by probing MangaKatana server mirrors (`""`, `"?sv=mk"`, `"?sv=3"`).
 pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>> {
     let mut last_retry_after = None;
     let mut last_err_msg = String::new();
 
-    for suffix in ["", "?sv=mk", "?sv=3"] {
+    for suffix in MIRROR_SUFFIXES {
         let url = format!("{}{}", chapter_url, suffix);
         let res = match client.get(&url).send() {
             Ok(r) => r,
@@ -40,9 +43,8 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
         };
 
         let status = res.status();
-        let retry_after = rate_limit::parse_retry_after(res.headers());
-        if retry_after.is_some() {
-            last_retry_after = retry_after;
+        if let Some(retry_after) = rate_limit::parse_retry_after(res.headers()) {
+            last_retry_after = Some(retry_after);
         }
 
         let text = match res.text() {

@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Result, bail};
 use regex::Regex;
 use rust_decimal::Decimal;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use std::{collections::HashSet, sync::LazyLock};
 use url::Url;
 
@@ -29,8 +29,42 @@ static ALT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".alt_name
 static ANCHOR_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 
 /// Extracts and normalizes text content from a parsed HTML element.
-pub fn element_text(el: &scraper::ElementRef) -> String {
+pub fn element_text(el: &ElementRef) -> String {
     el.text().collect::<Vec<_>>().join(" ").trim().to_string()
+}
+
+/// Extracts a clean list of non-empty text strings matching a selector.
+fn extract_text_list(doc: &Html, selector: &Selector) -> Vec<String> {
+    doc.select(selector)
+        .map(|e| element_text(&e))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Extracts the manga identifier slug from a URL path.
+fn manga_id_from_path(path: &str) -> &str {
+    path.split('/').next_back().unwrap_or("")
+}
+
+/// Constructs a `Manga` model for search results where extended metadata is not yet populated.
+fn search_result_manga(
+    id: &str,
+    title: String,
+    url: String,
+    cover_url: String,
+    status: String,
+) -> Manga {
+    Manga {
+        id: id.to_string(),
+        title,
+        url,
+        cover_url,
+        status,
+        description: String::new(),
+        genres: Vec::new(),
+        authors: Vec::new(),
+        alt_names: Vec::new(),
+    }
 }
 
 /// Parses search result HTML from MangaKatana into a list of matching `Manga` objects.
@@ -43,6 +77,7 @@ pub fn parse_search_results(
 ) -> Result<Vec<Manga>> {
     let doc = Html::parse_document(text);
 
+    // If redirected directly to a single manga details page
     if MANGA_RE.is_match(path) {
         let title = doc
             .select(&H1_SEL)
@@ -63,17 +98,13 @@ pub fn parse_search_results(
             .map(|e| element_text(&e))
             .unwrap_or_default();
 
-        return Ok(vec![Manga {
-            id: path.split('/').next_back().unwrap_or("").to_string(),
+        return Ok(vec![search_result_manga(
+            manga_id_from_path(path),
             title,
-            url: url.to_string(),
+            url.to_string(),
             cover_url,
             status,
-            description: String::new(),
-            genres: vec![],
-            authors: vec![],
-            alt_names: vec![],
-        }]);
+        )]);
     }
 
     let mut results = Vec::new();
@@ -86,8 +117,7 @@ pub fn parse_search_results(
             && let Ok(joined) = base_url_parsed.join(href)
         {
             let p = joined.path().trim_end_matches('/');
-            if MANGA_RE.is_match(p) && !seen.contains(joined.as_str()) {
-                seen.insert(joined.to_string());
+            if MANGA_RE.is_match(p) && seen.insert(joined.to_string()) {
                 let title = element_text(&anchor);
 
                 let cover_url = item
@@ -103,21 +133,49 @@ pub fn parse_search_results(
                     .map(|e| element_text(&e))
                     .unwrap_or_default();
 
-                results.push(Manga {
-                    id: p.split('/').next_back().unwrap_or("").to_string(),
+                results.push(search_result_manga(
+                    manga_id_from_path(p),
                     title,
-                    url: joined.to_string(),
+                    joined.to_string(),
                     cover_url,
                     status,
-                    description: String::new(),
-                    genres: vec![],
-                    authors: vec![],
-                    alt_names: vec![],
-                });
+                ));
             }
         }
     }
     Ok(results)
+}
+
+/// Parses an anchor element into a `Chapter` if it matches the manga's chapter URL pattern.
+fn parse_chapter_anchor(
+    anchor: &ElementRef,
+    base_url: &Url,
+    original_manga_path: &str,
+) -> Option<Chapter> {
+    let href = anchor.value().attr("href")?;
+    let joined = base_url.join(href).ok()?;
+    let path = joined.path().trim_end_matches('/');
+    let caps = CHAPTER_RE.captures(path)?;
+
+    if !caps.get(1)?.as_str().ends_with(original_manga_path) {
+        return None;
+    }
+
+    let num_str = caps.get(2)?.as_str();
+    let number = Decimal::from_str_exact(num_str).ok()?;
+
+    let text = element_text(anchor);
+    let label = if text.is_empty() {
+        format!("Chapter {}", num_str)
+    } else {
+        text
+    };
+
+    Some(Chapter {
+        number,
+        label,
+        url: joined.to_string(),
+    })
 }
 
 /// Parses a MangaKatana manga series detail page for its metadata and chapter listing.
@@ -130,7 +188,7 @@ pub fn parse_manga_page(
     let doc = Html::parse_document(text);
 
     let manga_path = effective_url.path().trim_end_matches('/');
-    let id = manga_path.split('/').next_back().unwrap_or("").to_string();
+    let id = manga_id_from_path(manga_path).to_string();
 
     let title = doc
         .select(&H1_SEL)
@@ -150,17 +208,8 @@ pub fn parse_manga_page(
         .map(|e| element_text(&e))
         .unwrap_or_default();
 
-    let genres: Vec<String> = doc
-        .select(&GENRES_SEL)
-        .map(|e| element_text(&e))
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let authors: Vec<String> = doc
-        .select(&AUTHORS_SEL)
-        .map(|e| element_text(&e))
-        .filter(|s| !s.is_empty())
-        .collect();
+    let genres = extract_text_list(&doc, &GENRES_SEL);
+    let authors = extract_text_list(&doc, &AUTHORS_SEL);
 
     let alt_names: Vec<String> = doc
         .select(&ALT_SEL)
@@ -197,37 +246,13 @@ pub fn parse_manga_page(
         alt_names,
     };
 
-    let mut chapters = Vec::new();
     let base_url_parsed = Url::parse(base_url)?;
     let original_manga_path = Url::parse(url)?.path().trim_end_matches('/').to_string();
 
-    for anchor in doc.select(&ANCHOR_SEL) {
-        if let Some(href) = anchor.value().attr("href")
-            && let Ok(joined) = base_url_parsed.join(href)
-        {
-            let p = joined.path().trim_end_matches('/');
-            if let Some(caps) = CHAPTER_RE.captures(p)
-                && caps
-                    .get(1)
-                    .is_some_and(|m| m.as_str().ends_with(&original_manga_path))
-            {
-                let num_str = caps.get(2).map_or("", |m| m.as_str());
-                if let Ok(num) = Decimal::from_str_exact(num_str) {
-                    let label = element_text(&anchor);
-                    let label = if label.is_empty() {
-                        format!("Chapter {}", num_str)
-                    } else {
-                        label
-                    };
-                    chapters.push(Chapter {
-                        number: num,
-                        label,
-                        url: joined.to_string(),
-                    });
-                }
-            }
-        }
-    }
+    let mut chapters: Vec<Chapter> = doc
+        .select(&ANCHOR_SEL)
+        .filter_map(|anchor| parse_chapter_anchor(&anchor, &base_url_parsed, &original_manga_path))
+        .collect();
 
     // Sort chapters ascending by number
     chapters.sort_by_key(|a| a.number);
@@ -241,19 +266,11 @@ pub fn parse_manga_page(
 
 /// Extracts chapter image URLs from the inline JavaScript array `var thzq = [...]`.
 pub fn extract_image_urls(text: &str) -> Option<Vec<String>> {
-    if let Some(caps) = THZQ_RE.captures(text) {
-        let array_content = caps.get(1).unwrap().as_str();
-        let mut urls = Vec::new();
-        for m in URL_RE.captures_iter(array_content) {
-            let mut u = m.get(1).unwrap().as_str().to_string();
-            if u.contains("&amp;") {
-                u = u.replace("&amp;", "&");
-            }
-            urls.push(u);
-        }
-        if !urls.is_empty() {
-            return Some(urls);
-        }
-    }
-    None
+    let array_content = THZQ_RE.captures(text)?.get(1)?.as_str();
+    let urls: Vec<String> = URL_RE
+        .captures_iter(array_content)
+        .filter_map(|m| m.get(1).map(|u| u.as_str().replace("&amp;", "&")))
+        .collect();
+
+    if urls.is_empty() { None } else { Some(urls) }
 }
