@@ -2,6 +2,7 @@ pub mod cache;
 pub mod cron;
 pub mod downloader;
 pub mod helpers;
+pub mod pool;
 pub mod routes;
 pub mod state;
 
@@ -10,7 +11,7 @@ use crate::{
     rate_limit::AdaptiveRateLimiter,
     scraper,
     server::{
-        cache::ServerCache, cron::run_cron, downloader::DownloadPool, routes::handle_route,
+        cache::ServerCache, cron::run_cron, pool::DownloadPool, routes::handle_route,
         state::AppState,
     },
 };
@@ -100,14 +101,8 @@ pub fn run_server(
                 };
 
                 let raw_url = request.url();
-                let parsed_url =
-                    if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
-                        Url::parse(raw_url)
-                    } else {
-                        Url::parse(&format!("http://localhost{}", raw_url))
-                    };
-                let parsed_url = match parsed_url {
-                    Ok(u) => u,
+                let (path, query) = match parse_request_url(raw_url) {
+                    Ok(pq) => pq,
                     Err(e) => {
                         warn!("Malformed URL in request '{}': {}", raw_url, e);
                         let _ = request
@@ -115,9 +110,6 @@ pub fn run_server(
                         continue;
                     }
                 };
-
-                let path = parsed_url.path().to_string();
-                let query: HashMap<_, _> = parsed_url.query_pairs().into_owned().collect();
 
                 info!("Received {} {}", request.method().as_str(), path);
 
@@ -163,4 +155,17 @@ pub fn run_server(
     }
 
     Ok(())
+}
+
+/// Normalizes and parses an incoming raw HTTP request URL into a path and query parameter map.
+fn parse_request_url(raw: &str) -> Result<(String, HashMap<String, String>), url::ParseError> {
+    let parsed = if raw.starts_with("http://") || raw.starts_with("https://") {
+        Url::parse(raw)?
+    } else {
+        Url::parse(&format!("http://localhost{}", raw))?
+    };
+
+    let path = parsed.path().to_string();
+    let query = parsed.query_pairs().into_owned().collect();
+    Ok((path, query))
 }

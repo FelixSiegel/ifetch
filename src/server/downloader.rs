@@ -10,71 +10,12 @@ use crate::{
 use log::{error, info, warn};
 use std::{
     collections::HashSet,
-    panic::{self, catch_unwind},
     path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{Sender, channel},
     },
-    thread::{Builder, JoinHandle},
 };
-
-pub type Job = Box<dyn FnOnce() + Send + 'static>;
-
-/// Thread pool specifically dedicated to executing background chapter downloads.
-pub struct DownloadPool {
-    sender: Sender<Job>,
-    _workers: Vec<JoinHandle<()>>,
-}
-
-impl DownloadPool {
-    /// Spawns a new download pool with `threads` worker threads.
-    pub fn new(threads: usize) -> Self {
-        let threads = threads.max(1);
-        let (sender, receiver) = channel::<Job>();
-        let receiver = Arc::new(Mutex::new(receiver));
-        let mut workers = Vec::with_capacity(threads);
-
-        for id in 0..threads {
-            let rx = Arc::clone(&receiver);
-            let handle = Builder::new()
-                .name(format!("ifetch-dl-{}", id))
-                .spawn(move || {
-                    loop {
-                        let job = {
-                            let rx_guard = lock_mutex(&rx);
-                            match rx_guard.recv() {
-                                Ok(job) => job,
-                                Err(_) => break, // Pool shutting down
-                            }
-                        };
-
-                        if let Err(panic_err) = catch_unwind(panic::AssertUnwindSafe(job)) {
-                            error!("Download worker {} caught panic: {:?}", id, panic_err);
-                        }
-                    }
-                })
-                .expect("Failed to spawn download worker thread");
-            workers.push(handle);
-        }
-
-        Self {
-            sender,
-            _workers: workers,
-        }
-    }
-
-    /// Queues a closure to be executed by the download worker pool.
-    pub fn spawn<F>(&self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        if let Err(e) = self.sender.send(Box::new(f)) {
-            error!("Failed to queue download task: {}", e);
-        }
-    }
-}
 
 /// RAII guard ensuring the manga ID is removed from `active_downloads` if early exit occurs.
 pub struct DownloadGuard {
@@ -108,6 +49,52 @@ pub struct MangaDownloadTracker {
     chapters: Vec<Chapter>,
 }
 
+impl MangaDownloadTracker {
+    /// Creates a new tracker initialized with the missing chapter count.
+    pub fn new(
+        id: String,
+        manga: Manga,
+        url: String,
+        chapters: Vec<Chapter>,
+        output_dir: PathBuf,
+        max_width: usize,
+        missing_count: usize,
+    ) -> Self {
+        Self {
+            id,
+            total_chapters: chapters.len(),
+            manga,
+            url,
+            missing_count,
+            remaining: AtomicUsize::new(missing_count),
+            success_count: AtomicUsize::new(0),
+            error_count: AtomicUsize::new(0),
+            first_error: Mutex::new(None),
+            output_dir,
+            max_width,
+            chapters,
+        }
+    }
+
+    /// Records a successfully downloaded chapter. Returns `true` if this was the last chapter.
+    pub fn record_success(&self) -> bool {
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+        self.remaining.fetch_sub(1, Ordering::SeqCst) == 1
+    }
+
+    /// Records a failed chapter download. Returns `true` if this was the last chapter.
+    pub fn record_error(&self, error: Option<String>) -> bool {
+        self.error_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(err) = error {
+            let mut fe = lock_mutex(&self.first_error);
+            if fe.is_none() {
+                *fe = Some(err);
+            }
+        }
+        self.remaining.fetch_sub(1, Ordering::SeqCst) == 1
+    }
+}
+
 /// RAII guard ensuring chapter completion and error accounting even if a worker panics.
 struct ChapterGuard<'a> {
     tracker: &'a MangaDownloadTracker,
@@ -117,11 +104,8 @@ struct ChapterGuard<'a> {
 
 impl<'a> Drop for ChapterGuard<'a> {
     fn drop(&mut self) {
-        if !self.completed {
-            self.tracker.error_count.fetch_add(1, Ordering::Relaxed);
-            if self.tracker.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
-                on_manga_download_complete(self.tracker, self.state);
-            }
+        if !self.completed && self.tracker.record_error(None) {
+            on_manga_download_complete(self.tracker, self.state);
         }
     }
 }
@@ -161,26 +145,8 @@ pub fn queue_background_download(
             disarmed: false,
         };
 
-        let (manga, chapters) = match preloaded {
-            Some(data) => data,
-            None => {
-                let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
-                match manga_chapters(&state.client, &url) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!("Failed to fetch chapter list for {}: {}", id, e);
-                        send_webhook(
-                            &state.client,
-                            NotificationType::Error {
-                                manga_title: &id,
-                                manga_url: &url,
-                                error_msg: &e.to_string(),
-                            },
-                        );
-                        return;
-                    }
-                }
-            }
+        let Some((manga, chapters)) = fetch_manga_data(&id, &state, preloaded) else {
+            return;
         };
 
         let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
@@ -223,20 +189,15 @@ pub fn queue_background_download(
         );
 
         let missing_len = missing.len();
-        let tracker = Arc::new(MangaDownloadTracker {
-            id: id.clone(),
-            manga: manga.clone(),
+        let tracker = Arc::new(MangaDownloadTracker::new(
+            id.clone(),
+            manga.clone(),
             url,
-            total_chapters: chapters.len(),
-            missing_count: missing_len,
-            remaining: AtomicUsize::new(missing_len),
-            success_count: AtomicUsize::new(0),
-            error_count: AtomicUsize::new(0),
-            first_error: Mutex::new(None),
-            output_dir: manga_output_dir,
+            chapters.clone(),
+            manga_output_dir,
             max_width,
-            chapters: chapters.clone(),
-        });
+            missing_len,
+        ));
 
         // Disarm guard: tracker completion logic handles removing from active_downloads
         guard.disarmed = true;
@@ -275,30 +236,52 @@ pub fn queue_background_download(
                     },
                 );
 
-                match res {
-                    Ok(Some(_)) | Ok(None) => {
-                        tracker.success_count.fetch_add(1, Ordering::Relaxed);
-                    }
+                let is_last = match res {
+                    Ok(Some(_)) | Ok(None) => tracker.record_success(),
                     Err(e) => {
                         error!(
                             "Failed to download chapter {} for {}: {}",
                             chapter.number, tracker.manga.title, e
                         );
-                        tracker.error_count.fetch_add(1, Ordering::Relaxed);
-                        let mut fe = lock_mutex(&tracker.first_error);
-                        if fe.is_none() {
-                            *fe = Some(e.to_string());
-                        }
+                        tracker.record_error(Some(e.to_string()))
                     }
-                }
+                };
 
                 guard.completed = true;
-                if tracker.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                if is_last {
                     on_manga_download_complete(&tracker, &state);
                 }
             });
         }
     });
+}
+
+/// Retrieves manga details and chapters from preloaded data or fetches them via HTTP.
+fn fetch_manga_data(
+    id: &str,
+    state: &AppState,
+    preloaded: Option<(Manga, Vec<Chapter>)>,
+) -> Option<(Manga, Vec<Chapter>)> {
+    if let Some(data) = preloaded {
+        return Some(data);
+    }
+
+    let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
+    match manga_chapters(&state.client, &url) {
+        Ok(data) => Some(data),
+        Err(e) => {
+            error!("Failed to fetch chapter list for {}: {}", id, e);
+            send_webhook(
+                &state.client,
+                NotificationType::Error {
+                    manga_title: id,
+                    manga_url: &url,
+                    error_msg: &e.to_string(),
+                },
+            );
+            None
+        }
+    }
 }
 
 /// Finalizer invoked when the last chapter task for a manga finishes downloading.

@@ -1,6 +1,6 @@
 use crate::{
     rate_limit::AdaptiveRateLimiter,
-    server::{cache::ServerCache, downloader::DownloadPool},
+    server::{cache::ServerCache, pool::DownloadPool},
 };
 use reqwest::blocking::Client;
 use std::{

@@ -243,7 +243,7 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
     let title = if let Some(title) = maybe_title {
         title
     } else {
-        let url = format!("https://mangakatana.com/manga/{}", id);
+        let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
         let (manga, chapters) = manga_chapters(&state.client, &url)?;
         let _ = upsert_manga(
             &lock_mutex(&state.db),
