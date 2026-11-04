@@ -1,4 +1,7 @@
+pub mod download;
 pub mod selector;
+
+pub use download::run_download;
 pub use selector::select_chapters;
 
 use crate::models::Manga;
