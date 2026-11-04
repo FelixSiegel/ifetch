@@ -73,6 +73,9 @@ fn fetch_book_list(client: &Client, endpoint: &str, page: usize) -> Result<Vec<M
     if is_rate_limited_response(status, &text) {
         return Err(RateLimitError::new(format!("Blocked or rate limited on {}", endpoint)).into());
     }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Vec::new());
+    }
     if !status.is_success() {
         bail!("HTTP error {} fetching from {}", status, url);
     }

@@ -144,6 +144,12 @@ impl MockUpstream {
                             || path.starts_with("/new-manga/page/")
                         {
                             search_hits.fetch_add(1, Ordering::SeqCst);
+                            if path.contains("/page/20000") {
+                                let _ = req.respond(
+                                    Response::from_string("Not Found").with_status_code(404),
+                                );
+                                continue;
+                            }
                             let html = format!(
                                 r#"<html><body>
                                 <div id="book_list">

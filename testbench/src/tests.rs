@@ -324,7 +324,18 @@ pub fn run_all_tests(
                 p2_mangas.len()
             );
 
-            Ok("GET /api/latest verified with pagination".to_string())
+            // Out-of-bounds page (upstream 404) returns []
+            let res_oob = client
+                .get(format!("{}/api/latest?page=20000", server_url))
+                .send()?
+                .error_for_status()?;
+            let oob_mangas: Vec<ApiManga> = res_oob.json()?;
+            ensure!(
+                oob_mangas.is_empty(),
+                "Expected empty array for out-of-bounds page 20000"
+            );
+
+            Ok("GET /api/latest verified with pagination and out-of-bounds 404 handling".to_string())
         },
     );
 
