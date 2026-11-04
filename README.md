@@ -18,15 +18,13 @@ You can run it as an interactive CLI tool or as a lightweight HTTP server. When 
 
 ## Features
 
-- **CBZ Packaging & Metadata**: Packages chapters into `.cbz` files containing full `ComicInfo.xml` metadata (title, series, number, volume, synopsis, genre, author).
-- **Clean Folder Structure**: Downloads each manga into its own folder and automatically calculates and maintains uniform zero-padding across chapter archives (e.g. `Chapter 001.cbz` vs `Chapter 100.cbz`).
-- **Interactive CLI**: Search titles interactively or pass URLs directly, with support for flexible chapter selectors (`all`, `1-10`, `1,3,5.5`).
-- **Self-Hosted Reader Server**: Exposes a REST API for searching, browsing, chapter reading, and on-demand background downloading.
-- **Mihon / Tachiyomi Extension**: Seamlessly integrate your self-hosted library into Mihon with the [ifetch-extension](https://github.com/FelixSiegel/ifetch-extension).
-- **Adaptive Rate Limiting**: Built-in pacing and Cloudflare challenge detection with burst allowances for immediate reading and exponential cooldown backoff.
-- **Automated Library Updates**: Periodic cron checks automatically fetch newly released chapters for tracked manga with exponential backoff for finished series.
-- **Minimal Resource Footprint**: Consumes ~10 MB RAM at idle or during regular browsing, maintaining a median usage of ~15 MB and peaking around ~100-120 MB under heavy concurrent image prefetching and multi-stream LRU eviction.
-- **Discord Webhooks**: Optional progress, completion, and error notifications.
+- **CLI & Server**: Download interactively from your terminal or run an HTTP backend for reader apps.
+- **Mihon Integration**: Browse, read, and trigger downloads using the [ifetch-extension](https://github.com/FelixSiegel/ifetch-extension).
+- **CBZ & Metadata**: Packages chapters into `.cbz` files with embedded `ComicInfo.xml` metadata.
+- **Fast Reading & Caching**: In-memory caching and prefetching for instant page turns.
+- **Automatic Updates**: Periodic background checks for new chapter releases.
+- **Lightweight**: Low resource footprint (~10-15 MB RAM baseline).
+- **Discord Webhooks**: Optional notifications for downloads and library updates.
 
 ## Installation
 
@@ -59,6 +57,7 @@ services:
       - IFETCH_PORT=8080
       - IFETCH_THREADS=2
       - IFETCH_CRON_HOURS=12
+      - IFETCH_CACHE_TTL_MINS=5
       - DISCORD_WEBHOOK_URL=
 ```
 
@@ -112,16 +111,17 @@ ifetch --server --port 8080 --output ./downloads --config ./config
 
 ### Configuration & Environment Variables
 
-| Variable              | CLI Flag          | Default     | Description                                                     |
-| :-------------------- | :---------------- | :---------- | :-------------------------------------------------------------- |
-| `IFETCH_SERVER`       | `--server`        | `false`     | Run as an HTTP server                                           |
-| `IFETCH_PORT`         | `-p`, `--port`    | `8080`      | Port for the HTTP server                                        |
-| `IFETCH_OUTPUT`       | `-o`, `--output`  | `downloads` | Directory for manga archives                                    |
-| `IFETCH_CONFIG`       | `-C`, `--config`  | `config`    | Directory for SQLite DB and config                              |
-| `IFETCH_THREADS`      | `-t`, `--threads` | `1`         | Concurrent chapter download threads                             |
-| `IFETCH_VERIFY`       | `--verify`        | `false`     | Check chapters for updates and re-download if necessary         |
-| `IFETCH_CRON_HOURS`   | —                 | `12`        | Interval in hours for automatic chapter checks (`0` to disable) |
-| `DISCORD_WEBHOOK_URL` | —                 | `None`      | Optional webhook URL for Discord alerts                         |
+| Variable                | CLI Flag          | Default     | Description                                                     |
+| :---------------------- | :---------------- | :---------- | :-------------------------------------------------------------- |
+| `IFETCH_SERVER`         | `--server`        | `false`     | Run as an HTTP server                                           |
+| `IFETCH_PORT`           | `-p`, `--port`    | `8080`      | Port for the HTTP server                                        |
+| `IFETCH_OUTPUT`         | `-o`, `--output`  | `downloads` | Directory for manga archives                                    |
+| `IFETCH_CONFIG`         | `-C`, `--config`  | `config`    | Directory for SQLite DB and config                              |
+| `IFETCH_THREADS`        | `-t`, `--threads` | `1`         | Concurrent chapter download threads                             |
+| `IFETCH_VERIFY`         | `--verify`        | `false`     | Check chapters for updates and re-download if necessary         |
+| `IFETCH_CRON_HOURS`     | —                 | `12`        | Interval in hours for automatic chapter checks (`0` to disable) |
+| `IFETCH_CACHE_TTL_MINS` | —                 | `5`         | In-memory TTL in minutes for upstream scraped manga metadata    |
+| `DISCORD_WEBHOOK_URL`   | —                 | `None`      | Optional webhook URL for Discord alerts                         |
 
 ## Mihon / Tachiyomi Extension
 
