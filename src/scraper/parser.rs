@@ -19,6 +19,8 @@ static COVER_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".cover 
 static STATUS_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".status").unwrap());
 static BOOK_LIST_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("#book_list").unwrap());
+static HOT_BOOK_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("#hot_book").unwrap());
 static SINGLE_BOOK_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("#single_book").unwrap());
 static CHAPTERS_SEL: LazyLock<Selector> =
@@ -139,14 +141,16 @@ pub fn parse_search_results(
         )]);
     }
 
+    parse_book_list(text, base_url)
+}
+
+/// Parses a container element containing `.item` cards into a deduplicated list of `Manga`.
+pub fn parse_manga_items_from_container(
+    container: &ElementRef,
+    base_url_parsed: &Url,
+) -> Vec<Manga> {
     let mut results = Vec::new();
     let mut seen = HashSet::new();
-    let base_url_parsed = Url::parse(base_url)?;
-
-    let container = doc
-        .select(&BOOK_LIST_SEL)
-        .next()
-        .unwrap_or_else(|| doc.root_element());
 
     for item in container.select(&ITEM_SEL) {
         if let Some(anchor) = item.select(&TITLE_SEL).next()
@@ -164,6 +168,7 @@ pub fn parse_search_results(
                     .and_then(|img| {
                         img.value()
                             .attr("data-src")
+                            .or_else(|| img.value().attr("lazy-src"))
                             .or_else(|| img.value().attr("src"))
                     })
                     .unwrap_or("")
@@ -185,7 +190,39 @@ pub fn parse_search_results(
             }
         }
     }
-    Ok(results)
+    results
+}
+
+/// Parses the front page hot manga widget (`#hot_book`) into a list of `Manga` objects.
+pub fn parse_hot_manga(text: &str, base_url: &str) -> Result<Vec<Manga>> {
+    let doc = Html::parse_document(text);
+    let base_url_parsed = Url::parse(base_url)?;
+    let Some(container) = doc.select(&HOT_BOOK_SEL).next() else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_manga_items_from_container(
+        &container,
+        &base_url_parsed,
+    ))
+}
+
+/// Parses a book list container (`#book_list`) into a list of `Manga` objects (used by `/latest` and `/new-manga`).
+pub fn parse_book_list(text: &str, base_url: &str) -> Result<Vec<Manga>> {
+    let doc = Html::parse_document(text);
+    let base_url_parsed = Url::parse(base_url)?;
+    let container = doc
+        .select(&BOOK_LIST_SEL)
+        .next()
+        .unwrap_or_else(|| doc.root_element());
+    Ok(parse_manga_items_from_container(
+        &container,
+        &base_url_parsed,
+    ))
+}
+
+/// Parses the latest updates book list (`#book_list`) into a list of `Manga` objects.
+pub fn parse_latest_manga(text: &str, base_url: &str) -> Result<Vec<Manga>> {
+    parse_book_list(text, base_url)
 }
 
 /// Parses an anchor element into a `Chapter` if it matches the manga's chapter URL pattern.

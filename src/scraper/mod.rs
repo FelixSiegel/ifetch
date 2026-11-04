@@ -2,7 +2,10 @@ pub mod client;
 pub mod parser;
 
 pub use client::{build_client, chapter_images};
-pub use parser::{extract_image_urls, parse_manga_page, parse_search_results};
+pub use parser::{
+    extract_image_urls, parse_book_list, parse_hot_manga, parse_latest_manga,
+    parse_manga_items_from_container, parse_manga_page, parse_search_results,
+};
 
 use crate::{
     models::{Chapter, Manga},
@@ -54,4 +57,53 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
 
     let base_url = format!("{}/", *crate::config::BASE_URL);
     parse_manga_page(&text, &effective_url, url, &base_url)
+}
+
+/// Helper to fetch paginated listings backed by `#book_list` (e.g. `/latest`, `/new-manga`).
+fn fetch_book_list(client: &Client, endpoint: &str, page: usize) -> Result<Vec<Manga>> {
+    let base_url = format!("{}/", *crate::config::BASE_URL);
+    let url = if page <= 1 {
+        format!("{}/{}", *crate::config::BASE_URL, endpoint)
+    } else {
+        format!("{}/{}/page/{}", *crate::config::BASE_URL, endpoint, page)
+    };
+    let res = client.get(&url).send()?;
+    let status = res.status();
+    let text = res.text()?;
+    if is_rate_limited_response(status, &text) {
+        return Err(RateLimitError::new(format!("Blocked or rate limited on {}", endpoint)).into());
+    }
+    if !status.is_success() {
+        bail!("HTTP error {} fetching from {}", status, url);
+    }
+    parse_book_list(&text, &base_url)
+}
+
+/// Fetches latest updated manga from MangaKatana.
+pub fn latest_manga(client: &Client, page: usize) -> Result<Vec<Manga>> {
+    fetch_book_list(client, "latest", page)
+}
+
+/// Fetches newly added manga from MangaKatana.
+pub fn new_manga(client: &Client, page: usize) -> Result<Vec<Manga>> {
+    fetch_book_list(client, "new-manga", page)
+}
+
+/// Fetches hot/popular manga from MangaKatana.
+pub fn popular_manga(client: &Client, page: usize) -> Result<Vec<Manga>> {
+    if page > 1 {
+        return Ok(Vec::new());
+    }
+    let base_url = format!("{}/", *crate::config::BASE_URL);
+    let url = format!("{}/", *crate::config::BASE_URL);
+    let res = client.get(&url).send()?;
+    let status = res.status();
+    let text = res.text()?;
+    if is_rate_limited_response(status, &text) {
+        return Err(RateLimitError::new("Popular manga blocked or rate limited").into());
+    }
+    if !status.is_success() {
+        bail!("HTTP error {} fetching popular manga from {}", status, url);
+    }
+    parse_hot_manga(&text, &base_url)
 }

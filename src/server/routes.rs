@@ -1,6 +1,6 @@
 use crate::{
     db::{CheckTrigger, get_manga_title, upsert_manga},
-    scraper::{manga_chapters, search_manga},
+    scraper::{latest_manga, manga_chapters, new_manga, popular_manga, search_manga},
     server::{
         downloader::queue_background_download,
         helpers::{
@@ -33,6 +33,15 @@ pub fn handle_route(
     if path == "/api/search" {
         return search(query, state);
     }
+    if path == "/api/popular" {
+        return popular(query, state);
+    }
+    if path == "/api/latest" {
+        return latest(query, state);
+    }
+    if path == "/api/new" {
+        return new(query, state);
+    }
     if let Some(rest) = path.strip_prefix("/api/manga/") {
         if let Some(id) = rest.strip_suffix("/chapters") {
             return manga_chapters_route(id, state);
@@ -61,6 +70,39 @@ fn search(query: &HashMap<String, String>, state: &AppState) -> Result<Response<
     };
 
     let results = search_manga(&state.client, q)?;
+    json_response(&results)
+}
+
+fn parse_page_param(query: &HashMap<String, String>) -> usize {
+    query
+        .get("page")
+        .or_else(|| query.get("p"))
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(1)
+}
+
+/// GET /api/popular
+/// Returns hot/popular manga from the front page.
+fn popular(query: &HashMap<String, String>, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
+    let page = parse_page_param(query);
+    let results = popular_manga(&state.client, page)?;
+    json_response(&results)
+}
+
+/// GET /api/latest
+/// Returns latest updated manga from MangaKatana.
+fn latest(query: &HashMap<String, String>, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
+    let page = parse_page_param(query);
+    let results = latest_manga(&state.client, page)?;
+    json_response(&results)
+}
+
+/// GET /api/new
+/// Returns newly added manga from MangaKatana.
+fn new(query: &HashMap<String, String>, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
+    let page = parse_page_param(query);
+    let results = new_manga(&state.client, page)?;
     json_response(&results)
 }
 
