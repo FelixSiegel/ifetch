@@ -7,6 +7,7 @@ pub mod routes;
 pub mod state;
 
 use crate::{
+    config::CACHE_TTL_MINS,
     db::{check_version_update, init_db},
     rate_limit::AdaptiveRateLimiter,
     scraper,
@@ -22,6 +23,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     thread::spawn,
+    time::Duration,
 };
 use tiny_http::{Response, Server};
 use url::Url;
@@ -77,7 +79,10 @@ pub fn run_server(
         active_downloads: Arc::new(Mutex::new(HashSet::new())),
         db,
         download_pool: Arc::new(DownloadPool::new(threads)),
-        cache: Arc::new(ServerCache::new(64 * 1024 * 1024)), // 64 MB LRU image cache
+        cache: Arc::new(ServerCache::new(
+            64 * 1024 * 1024,
+            Duration::from_secs((*CACHE_TTL_MINS).max(1) * 60),
+        )),
         rate_limiter: Arc::new(AdaptiveRateLimiter::new()),
     });
 

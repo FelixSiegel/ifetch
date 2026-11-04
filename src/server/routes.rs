@@ -64,6 +64,25 @@ fn search(query: &HashMap<String, String>, state: &AppState) -> Result<Response<
     json_response(&results)
 }
 
+const PREFETCH_PAGES: usize = 5;
+
+/// Fetches `(Manga, Vec<Chapter>)` from the short-lived TTL cache or scrapes MangaKatana on a miss.
+fn fetch_or_cache_remote_manga(
+    id: &str,
+    state: &AppState,
+) -> Result<(crate::models::Manga, Vec<crate::models::Chapter>)> {
+    if let Some(cached) = state.cache.get_remote_manga(id) {
+        return Ok(cached);
+    }
+
+    let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
+    let (manga, chapters) = manga_chapters(&state.client, &url)?;
+    state
+        .cache
+        .put_remote_manga(id.to_string(), manga.clone(), chapters.clone());
+    Ok((manga, chapters))
+}
+
 /// GET /api/manga/{id}
 /// Returns metadata for the specified manga ID.
 fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
@@ -71,8 +90,7 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
-    let (manga, chapters) = manga_chapters(&state.client, &url)?;
+    let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
 
     let folder = get_folder_name(&manga.title);
     let manga_dir = state.output_dir.join(&folder);
@@ -102,8 +120,7 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
-    let (manga, chapters) = manga_chapters(&state.client, &url)?;
+    let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
 
     let folder = get_folder_name(&manga.title);
     let manga_dir = state.output_dir.join(&folder);
@@ -140,6 +157,36 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
     json_response(&existing_chapters)
 }
 
+/// Resolves and caches the `.cbz` archive path for a chapter.
+fn resolve_chapter_cbz(
+    chap_id: &str,
+    id: &str,
+    number: &str,
+    state: &AppState,
+) -> Result<Option<PathBuf>> {
+    let cached = {
+        let cbz_map = lock_mutex(&state.cache.chapter_cbz_paths);
+        cbz_map.get(chap_id).cloned()
+    };
+    if let Some(p) = cached {
+        if p.exists() {
+            return Ok(Some(p));
+        }
+    }
+
+    let (title, manga_dir) = resolve_manga(id, state)?;
+    let Some(cbz_path) = find_chapter_cbz(&manga_dir, &title, number) else {
+        return Ok(None);
+    };
+
+    {
+        let mut cbz_map = lock_mutex(&state.cache.chapter_cbz_paths);
+        cbz_map.insert(chap_id.to_string(), cbz_path.clone());
+    }
+
+    Ok(Some(cbz_path))
+}
+
 /// GET /api/chapter/{id}::{number}/pages
 /// Returns the list of image URLs contained within the chapter's CBZ archive.
 fn chapter_pages(chap_id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
@@ -151,9 +198,7 @@ fn chapter_pages(chap_id: &str, state: &AppState) -> Result<Response<Cursor<Vec<
         return json_response(&pages);
     }
 
-    let (title, manga_dir) = resolve_manga(id, state)?;
-
-    let cbz_path = match find_chapter_cbz(&manga_dir, &title, number) {
+    let cbz_path = match resolve_chapter_cbz(chap_id, id, number, state)? {
         Some(p) => p,
         None => {
             warn!(
@@ -200,9 +245,7 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
         return Ok(image_response(&cached_data, ct));
     }
 
-    let (title, manga_dir) = resolve_manga(id, state)?;
-
-    let cbz_path = match find_chapter_cbz(&manga_dir, &title, number) {
+    let cbz_path = match resolve_chapter_cbz(chap_id, id, number, state)? {
         Some(p) => p,
         None => {
             return Ok(not_found("Chapter not found"));
@@ -211,22 +254,66 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
 
     let file = std::fs::File::open(&cbz_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut img_file = match archive.by_name(filename) {
-        Ok(f) => f,
-        Err(_) => {
-            return Ok(not_found("Image not found in chapter"));
-        }
+
+    // Extract the requested page first and insert it into the cache immediately
+    let requested_data: Arc<[u8]> = {
+        let mut img_file = match archive.by_name(filename) {
+            Ok(f) => f,
+            Err(_) => {
+                return Ok(not_found("Image not found in chapter"));
+            }
+        };
+
+        let max_img_size = img_file.size().min(50 * 1024 * 1024) as usize;
+        let mut buf = Vec::with_capacity(max_img_size);
+        img_file.read_to_end(&mut buf)?;
+        Arc::from(buf.into_boxed_slice())
     };
 
-    let max_img_size = img_file.size().min(50 * 1024 * 1024) as usize;
-    let mut buf = Vec::with_capacity(max_img_size);
-    img_file.read_to_end(&mut buf)?;
+    lock_mutex(&state.cache.image_cache).insert(cache_key, Arc::clone(&requested_data));
 
-    let arc_data: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
-    lock_mutex(&state.cache.image_cache).insert(cache_key, Arc::clone(&arc_data));
+    // Determine the next few page filenames in sorted order and pre-load any that aren't cached yet
+    let mut all_names: Vec<String> = archive
+        .file_names()
+        .filter(|name| *name != "ComicInfo.xml" && !name.ends_with('/'))
+        .map(String::from)
+        .collect();
+    all_names.sort();
+
+    if let Some(pos) = all_names.iter().position(|n| n == filename) {
+        let next_names = &all_names[pos + 1..(pos + 1 + PREFETCH_PAGES).min(all_names.len())];
+        let to_load: Vec<(String, String)> = {
+            let img_cache = lock_mutex(&state.cache.image_cache);
+            next_names
+                .iter()
+                .filter_map(|name| {
+                    let key = format!("{}/{}", chap_id, name);
+                    (!img_cache.contains(&key)).then_some((name.clone(), key))
+                })
+                .collect()
+        };
+
+        let mut prefetched = Vec::with_capacity(to_load.len());
+        for (next_name, key) in to_load {
+            if let Ok(mut entry) = archive.by_name(&next_name) {
+                let size = entry.size().min(50 * 1024 * 1024) as usize;
+                let mut buf = Vec::with_capacity(size);
+                if entry.read_to_end(&mut buf).is_ok() {
+                    prefetched.push((key, Arc::<[u8]>::from(buf.into_boxed_slice())));
+                }
+            }
+        }
+
+        if !prefetched.is_empty() {
+            let mut img_cache = lock_mutex(&state.cache.image_cache);
+            for (key, data) in prefetched {
+                img_cache.insert(key, data);
+            }
+        }
+    }
 
     let ct = get_mime_type(filename);
-    Ok(image_response(&arc_data, ct))
+    Ok(image_response(&requested_data, ct))
 }
 
 /// Resolves a manga ID to its title and output directory, consulting the cache and database.
@@ -243,8 +330,7 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
     let title = if let Some(title) = maybe_title {
         title
     } else {
-        let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
-        let (manga, chapters) = manga_chapters(&state.client, &url)?;
+        let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
         let _ = upsert_manga(
             &lock_mutex(&state.db),
             id,

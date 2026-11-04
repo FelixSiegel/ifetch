@@ -1,9 +1,5 @@
 use lru::LruCache;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 /// Memory-bounded LRU cache for image bytes.
 ///
@@ -23,6 +19,11 @@ impl ImageLruCache {
             current_bytes: 0,
             cache: LruCache::unbounded(),
         }
+    }
+
+    /// Checks whether a key is currently present in the cache without promoting it.
+    pub fn contains(&self, key: &str) -> bool {
+        self.cache.contains(key)
     }
 
     /// Retrieves cached image bytes if present.
@@ -49,27 +50,6 @@ impl ImageLruCache {
             } else {
                 break;
             }
-        }
-    }
-}
-
-/// Central in-memory cache shared across HTTP worker threads.
-pub struct ServerCache {
-    /// Maps manga ID to its resolved title and disk directory path.
-    pub manga_dirs: Mutex<HashMap<String, (String, PathBuf)>>,
-    /// Maps chapter ID (`manga_id::chapter_num`) to its sorted list of page image filenames.
-    pub chapter_pages: Mutex<HashMap<String, Vec<String>>>,
-    /// Byte-bounded LRU cache for decompressed or fetched chapter page images.
-    pub image_cache: Mutex<ImageLruCache>,
-}
-
-impl ServerCache {
-    /// Creates a new `ServerCache` instance with the specified image memory cap.
-    pub fn new(max_image_bytes: usize) -> Self {
-        Self {
-            manga_dirs: Mutex::new(HashMap::new()),
-            chapter_pages: Mutex::new(HashMap::new()),
-            image_cache: Mutex::new(ImageLruCache::new(max_image_bytes)),
         }
     }
 }

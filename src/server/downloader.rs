@@ -292,8 +292,9 @@ fn on_manga_download_complete(tracker: &MangaDownloadTracker, state: &AppState) 
         disarmed: false,
     };
 
-    lock_mutex(&state.cache.chapter_pages)
-        .retain(|k, _| !k.starts_with(&format!("{}::", tracker.id)));
+    let prefix = format!("{}::", tracker.id);
+    lock_mutex(&state.cache.chapter_pages).retain(|k, _| !k.starts_with(&prefix));
+    lock_mutex(&state.cache.chapter_cbz_paths).retain(|k, _| !k.starts_with(&prefix));
 
     let total_successes = tracker.success_count.load(Ordering::Relaxed);
     let total_errors = tracker.error_count.load(Ordering::Relaxed);

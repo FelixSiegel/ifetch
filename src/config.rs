@@ -14,6 +14,13 @@ pub static CRON_HOURS: LazyLock<i64> = LazyLock::new(|| {
         .unwrap_or(12)
 });
 
+pub static CACHE_TTL_MINS: LazyLock<u64> = LazyLock::new(|| {
+    var("IFETCH_CACHE_TTL_MINS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5)
+});
+
 pub static DISCORD_WEBHOOK_URL: LazyLock<Option<String>> = LazyLock::new(|| {
     var("DISCORD_WEBHOOK_URL")
         .ok()
