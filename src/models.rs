@@ -16,6 +16,9 @@ pub struct Manga {
     /// Publication status of the manga (e.g. "Ongoing" or "Completed").
     #[serde(skip_serializing_if = "String::is_empty")]
     pub status: String,
+    /// Relationship type if this manga is listed under `related` (e.g. "Side Story", "Spin-off").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relation: String,
     /// Synopsis or description of the manga series.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -28,6 +31,9 @@ pub struct Manga {
     /// Alternative titles or localized names for the manga.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub alt_names: Vec<String>,
+    /// Related manga series (e.g. side stories, spin-offs, prequels, sequels).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<Manga>,
 }
 
 /// Represents a single chapter within a manga series.

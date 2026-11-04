@@ -34,6 +34,10 @@ static AUTHORS_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".authors a.author").unwrap());
 static ALT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".alt_name").unwrap());
 static ANCHOR_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
+static RELATED_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("#related").unwrap());
+static RELATION_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".uk-text-success").unwrap());
 
 /// Extracts and normalizes text content from a parsed HTML element.
 pub fn element_text(el: &ElementRef) -> String {
@@ -86,10 +90,12 @@ fn search_result_manga(
         url,
         cover_url,
         status,
+        relation: String::new(),
         description: String::new(),
         genres: Vec::new(),
         authors: Vec::new(),
         alt_names: Vec::new(),
+        related: Vec::new(),
     }
 }
 
@@ -217,6 +223,66 @@ fn parse_chapter_anchor(
     })
 }
 
+/// Parses related manga entries (side stories, spin-offs, prequels, sequels) from `#related`.
+fn parse_related_manga(doc: &Html, base_url_parsed: &Url) -> Vec<Manga> {
+    let Some(container) = doc.select(&RELATED_SEL).next() else {
+        return Vec::new();
+    };
+
+    let mut related = Vec::new();
+
+    for item in container.select(&ITEM_SEL) {
+        if let Some(anchor) = item.select(&TITLE_SEL).next()
+            && let Some(href) = anchor.value().attr("href")
+            && let Ok(joined) = base_url_parsed.join(href)
+        {
+            let p = joined.path().trim_end_matches('/');
+            let id = manga_id_from_path(p);
+            if MANGA_RE.is_match(p) {
+                let title = element_text(&anchor);
+                let relation = item
+                    .select(&RELATION_SEL)
+                    .next()
+                    .map(|e| element_text(&e))
+                    .unwrap_or_else(|| "Related".to_string());
+
+                let cover_url = item
+                    .select(&WRAP_IMG_SEL)
+                    .next()
+                    .and_then(|img| {
+                        img.value()
+                            .attr("data-src")
+                            .or_else(|| img.value().attr("lazy-src"))
+                            .or_else(|| img.value().attr("src"))
+                    })
+                    .unwrap_or("")
+                    .to_string();
+
+                let status = item
+                    .select(&STATUS_SEL)
+                    .next()
+                    .map(|e| element_text(&e))
+                    .unwrap_or_default();
+
+                related.push(Manga {
+                    id: id.to_string(),
+                    title,
+                    url: joined.to_string(),
+                    cover_url,
+                    status,
+                    relation,
+                    description: String::new(),
+                    genres: Vec::new(),
+                    authors: Vec::new(),
+                    alt_names: Vec::new(),
+                    related: Vec::new(),
+                });
+            }
+        }
+    }
+    related
+}
+
 /// Parses a MangaKatana manga series detail page for its metadata and chapter listing.
 pub fn parse_manga_page(
     text: &str,
@@ -282,19 +348,23 @@ pub fn parse_manga_page(
         .map(|e| element_text(&e))
         .unwrap_or_default();
 
+    let base_url_parsed = Url::parse(base_url)?;
+    let related = parse_related_manga(&doc, &base_url_parsed);
+
     let manga = Manga {
         id,
         title,
         url: effective_url.to_string(),
         cover_url,
         status,
+        relation: String::new(),
         description,
         genres,
         authors,
         alt_names,
+        related,
     };
 
-    let base_url_parsed = Url::parse(base_url)?;
     let original_manga_path = Url::parse(url)?.path().trim_end_matches('/').to_string();
 
     let chapters_scope = info_scope
