@@ -254,6 +254,116 @@ pub fn run_all_tests(
             Ok("0 results -> []".to_string())
         },
     );
+
+    run_case(
+        &mut results,
+        "Search & Scraping",
+        "Popular manga returns front page hot manga with page handling",
+        || {
+            let res = client
+                .get(format!("{}/api/popular", server_url))
+                .send()?
+                .error_for_status()?;
+            let popular_mangas: Vec<ApiManga> = res.json()?;
+            ensure!(
+                popular_mangas.len() == 1,
+                "Expected 1 hot manga, got {}",
+                popular_mangas.len()
+            );
+            ensure!(
+                popular_mangas[0].id == "cyber-blade.101",
+                "Unexpected hot manga ID: {}",
+                popular_mangas[0].id
+            );
+
+            // Page > 1 returns empty array
+            let res_p2 = client
+                .get(format!("{}/api/popular?page=2", server_url))
+                .send()?
+                .error_for_status()?;
+            let p2_mangas: Vec<ApiManga> = res_p2.json()?;
+            ensure!(
+                p2_mangas.is_empty(),
+                "Expected empty array for page 2 popular manga"
+            );
+
+            Ok("GET /api/popular verified with page handling".to_string())
+        },
+    );
+
+    run_case(
+        &mut results,
+        "Search & Scraping",
+        "Latest manga returns updated manga list and supports pagination",
+        || {
+            let res = client
+                .get(format!("{}/api/latest", server_url))
+                .send()?
+                .error_for_status()?;
+            let latest_mangas: Vec<ApiManga> = res.json()?;
+            ensure!(
+                latest_mangas.len() == 2,
+                "Expected 2 latest manga, got {}",
+                latest_mangas.len()
+            );
+            ensure!(
+                latest_mangas[0].id == "cyber-blade.101",
+                "Unexpected first latest manga ID: {}",
+                latest_mangas[0].id
+            );
+
+            // Page 2 request
+            let res_p2 = client
+                .get(format!("{}/api/latest?page=2", server_url))
+                .send()?
+                .error_for_status()?;
+            let p2_mangas: Vec<ApiManga> = res_p2.json()?;
+            ensure!(
+                p2_mangas.len() == 2,
+                "Expected 2 latest manga on page 2, got {}",
+                p2_mangas.len()
+            );
+
+            Ok("GET /api/latest verified with pagination".to_string())
+        },
+    );
+
+    run_case(
+        &mut results,
+        "Search & Scraping",
+        "New manga returns newly added manga list and supports pagination",
+        || {
+            let res = client
+                .get(format!("{}/api/new", server_url))
+                .send()?
+                .error_for_status()?;
+            let new_mangas: Vec<ApiManga> = res.json()?;
+            ensure!(
+                new_mangas.len() == 2,
+                "Expected 2 new manga, got {}",
+                new_mangas.len()
+            );
+            ensure!(
+                new_mangas[0].id == "cyber-blade.101",
+                "Unexpected first new manga ID: {}",
+                new_mangas[0].id
+            );
+
+            // Page 2 request
+            let res_p2 = client
+                .get(format!("{}/api/new?page=2", server_url))
+                .send()?
+                .error_for_status()?;
+            let p2_mangas: Vec<ApiManga> = res_p2.json()?;
+            ensure!(
+                p2_mangas.len() == 2,
+                "Expected 2 new manga on page 2, got {}",
+                p2_mangas.len()
+            );
+
+            Ok("GET /api/new verified with pagination".to_string())
+        },
+    );
     monitor.record_phase("2. Search & Scraping", phase_marker);
 
     // Phase 3: Manga Details & Remote TTL Cache Proof

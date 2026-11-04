@@ -108,6 +108,45 @@ impl MockUpstream {
                             } else {
                                 let html = format!(
                                     r#"<html><body>
+                                    <div id="hot_book" class="widget">
+                                        <div class="item">
+                                            <div class="title"><a href="{base}/manga/cyber-blade.101">Cyber Blade &amp; &lt;Steel&gt;</a></div>
+                                            <div class="wrap_img"><img data-src="{base}/img/cover_101.jpg" /></div>
+                                            <div class="status">Ongoing</div>
+                                        </div>
+                                    </div>
+                                    <div id="book_list">
+                                        <div class="item">
+                                            <div class="title"><a href="{base}/manga/cyber-blade.101">Cyber Blade &amp; &lt;Steel&gt;</a></div>
+                                            <div class="wrap_img"><img data-src="{base}/img/cover_101.jpg" /></div>
+                                            <div class="status">Ongoing</div>
+                                        </div>
+                                        <div class="item">
+                                            <div class="title"><a href="/manga/padding-saga.202">Padding Saga</a></div>
+                                            <div class="wrap_img"><img src="{base}/img/cover_202.png" /></div>
+                                            <div class="status">Completed</div>
+                                        </div>
+                                        <!-- Duplicate item to verify deduplication -->
+                                        <div class="item">
+                                            <div class="title"><a href="{base}/manga/cyber-blade.101">Cyber Blade Duplicate</a></div>
+                                        </div>
+                                    </div>
+                                    </body></html>"#
+                                );
+                                let _ = req.respond(html_resp(200, &html));
+                            }
+                            continue;
+                        }
+
+                        if path == "/latest"
+                            || path.starts_with("/latest/page/")
+                            || path == "/new-manga"
+                            || path.starts_with("/new-manga/page/")
+                        {
+                            search_hits.fetch_add(1, Ordering::SeqCst);
+                            let html = format!(
+                                r#"<html><body>
+                                <div id="book_list">
                                     <div class="item">
                                         <div class="title"><a href="{base}/manga/cyber-blade.101">Cyber Blade &amp; &lt;Steel&gt;</a></div>
                                         <div class="wrap_img"><img data-src="{base}/img/cover_101.jpg" /></div>
@@ -118,14 +157,10 @@ impl MockUpstream {
                                         <div class="wrap_img"><img src="{base}/img/cover_202.png" /></div>
                                         <div class="status">Completed</div>
                                     </div>
-                                    <!-- Duplicate item to verify deduplication -->
-                                    <div class="item">
-                                        <div class="title"><a href="{base}/manga/cyber-blade.101">Cyber Blade Duplicate</a></div>
-                                    </div>
-                                    </body></html>"#
-                                );
-                                let _ = req.respond(html_resp(200, &html));
-                            }
+                                </div>
+                                </body></html>"#
+                            );
+                            let _ = req.respond(html_resp(200, &html));
                             continue;
                         }
 
