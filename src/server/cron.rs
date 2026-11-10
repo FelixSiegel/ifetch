@@ -5,7 +5,7 @@ use crate::{
     server::{downloader::queue_background_download, helpers::lock_mutex, state::AppState},
     utils::get_folder_name,
 };
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::{
     panic::{self, catch_unwind},
     sync::Arc,
@@ -24,17 +24,36 @@ pub fn run_cron(state: &Arc<AppState>) {
 
     loop {
         let cron_cycle = catch_unwind(panic::AssertUnwindSafe(|| {
-            info!("Starting periodic auto-update cron job...");
             let mangas_to_check = {
                 let conn = lock_mutex(&state.db);
-                get_mangas_to_check(&conn).unwrap_or_default()
+                match get_mangas_to_check(&conn) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!("Auto-update cron failed to query database: {}", e);
+                        return;
+                    }
+                }
             };
+
+            if mangas_to_check.is_empty() {
+                debug!("Auto-update cron: 0 series due for check");
+                return;
+            }
+
+            let total_due = mangas_to_check.len();
+            info!(
+                "Auto-update cron: checking {} series for updates",
+                total_due
+            );
+            let mut updated_count = 0;
+            let mut checked_count = 0;
 
             for manga_chk in mangas_to_check {
                 sleep(Duration::from_secs(2));
                 let url = format!("{}/manga/{}", *crate::config::BASE_URL, manga_chk.id);
                 match manga_chapters(&state.client, &url) {
                     Ok((manga, mut chapters)) => {
+                        checked_count += 1;
                         let folder = get_folder_name(&manga.title);
                         let manga_dir = state.output_dir.join(&folder);
                         let (_, local_count) = crate::utils::scan_manga_chapters(
@@ -56,10 +75,21 @@ pub fn run_cron(state: &Arc<AppState>) {
                         );
 
                         if did_update {
+                            let new_chapters = chapters.len().saturating_sub(local_count);
+                            info!(
+                                "Auto-update cron: found {} new chapter(s) for '{}' ({})",
+                                new_chapters, manga.title, manga_chk.id
+                            );
+                            updated_count += 1;
                             queue_background_download(
                                 &manga_chk.id,
                                 state,
                                 Some((manga, chapters)),
+                            );
+                        } else {
+                            debug!(
+                                "Auto-update cron: '{}' ({}) is up to date ({} chapters)",
+                                manga.title, manga_chk.id, local_count
                             );
                         }
                     }
@@ -68,6 +98,11 @@ pub fn run_cron(state: &Arc<AppState>) {
                     }
                 }
             }
+
+            info!(
+                "Auto-update cron completed: checked {}/{} series, triggered {} update(s)",
+                checked_count, total_due, updated_count
+            );
         }));
 
         if let Err(e) = cron_cycle {
