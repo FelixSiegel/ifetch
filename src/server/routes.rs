@@ -515,7 +515,8 @@ fn chapter_pages(chap_id: &str, state: &AppState) -> Result<Response<Cursor<Vec<
     let archive = zip::ZipArchive::new(file)?;
     let mut pages: Vec<String> = archive
         .file_names()
-        .filter(|name| *name != "ComicInfo.xml" && !name.ends_with('/'))
+        .filter_map(Result::ok)
+        .filter(|name| name != "ComicInfo.xml" && !name.ends_with('/'))
         .map(|name| format!("/api/image/{}/{}", chap_id, name))
         .collect();
 
@@ -577,8 +578,9 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
     // Determine the next few page filenames in sorted order and pre-load any that aren't cached yet
     let mut all_names: Vec<String> = archive
         .file_names()
-        .filter(|name| *name != "ComicInfo.xml" && !name.ends_with('/'))
-        .map(String::from)
+        .filter_map(Result::ok)
+        .filter(|name| name != "ComicInfo.xml" && !name.ends_with('/'))
+        .map(|s| s.into_owned())
         .collect();
     all_names.sort();
 
