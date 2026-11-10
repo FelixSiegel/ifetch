@@ -51,22 +51,18 @@ pub fn upgrade_padding(
 }
 
 /// Scans the manga directory for existing chapters, upgrades filename padding if needed,
-/// and partitions the chapters into already downloaded chapters and missing chapters.
+/// and marks each chapter's `downloaded` status in-place.
+/// Returns `(padding_width, existing_count)`.
 pub fn scan_manga_chapters(
     manga_dir: &std::path::Path,
     title: &str,
-    chapters: &[crate::models::Chapter],
-) -> (
-    usize,
-    Vec<crate::models::Chapter>,
-    Vec<crate::models::Chapter>,
-) {
+    chapters: &mut [crate::models::Chapter],
+) -> (usize, usize) {
     let width = determine_width(chapters);
     upgrade_padding(title, chapters, manga_dir, width);
 
-    let mut existing = Vec::new();
-    let mut missing = Vec::new();
     let dir_exists = manga_dir.exists();
+    let mut existing_count = 0;
 
     for chapter in chapters {
         let num_str = chapter.number.to_string();
@@ -76,11 +72,12 @@ pub fn scan_manga_chapters(
         if dir_exists
             && (direct_path.exists() || find_chapter_cbz(manga_dir, title, &num_str).is_some())
         {
-            existing.push(chapter.clone());
+            chapter.downloaded = true;
+            existing_count += 1;
         } else {
-            missing.push(chapter.clone());
+            chapter.downloaded = false;
         }
     }
 
-    (width, existing, missing)
+    (width, existing_count)
 }

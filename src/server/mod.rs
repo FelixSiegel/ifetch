@@ -18,7 +18,8 @@ use crate::{
 };
 use log::{error, info, warn};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
+    io::Read,
     panic::{self, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -76,7 +77,7 @@ pub fn run_server(
     let state = Arc::new(AppState {
         client,
         output_dir: Arc::new(output_dir),
-        active_downloads: Arc::new(Mutex::new(HashSet::new())),
+        active_downloads: Arc::new(Mutex::new(HashMap::new())),
         db,
         download_pool: Arc::new(DownloadPool::new(threads)),
         cache: Arc::new(ServerCache::new(
@@ -100,7 +101,7 @@ pub fn run_server(
 
         let handle = spawn(move || {
             loop {
-                let request = match server.recv() {
+                let mut request = match server.recv() {
                     Ok(req) => req,
                     Err(_) => break,
                 };
@@ -116,10 +117,38 @@ pub fn run_server(
                     }
                 };
 
-                info!("Received {} {}", request.method().as_str(), path);
+                let method = request.method().clone();
+                let mut body = Vec::new();
+                if matches!(
+                    method,
+                    tiny_http::Method::Post | tiny_http::Method::Put | tiny_http::Method::Patch
+                ) {
+                    const MAX_REQUEST_BODY_SIZE: u64 = 1024 * 1024; // 1 MiB
+                    if let Err(e) = request
+                        .as_reader()
+                        .take(MAX_REQUEST_BODY_SIZE + 1)
+                        .read_to_end(&mut body)
+                    {
+                        warn!("Failed to read request body for {}: {}", path, e);
+                        let _ =
+                            request.respond(helpers::bad_request("Failed to read request body"));
+                        continue;
+                    }
+
+                    if body.len() as u64 > MAX_REQUEST_BODY_SIZE {
+                        warn!(
+                            "Request body for {} exceeded max size limit of {} bytes",
+                            path, MAX_REQUEST_BODY_SIZE
+                        );
+                        let _ = request.respond(helpers::payload_too_large("Payload Too Large"));
+                        continue;
+                    }
+                }
+
+                info!("Received {} {}", method.as_str(), path);
 
                 let response = catch_unwind(panic::AssertUnwindSafe(|| {
-                    handle_route(&path, &query, &state)
+                    handle_route(&method, &path, &query, &body, &state)
                 }));
 
                 match response {

@@ -148,7 +148,7 @@ pub fn run_download(args: Cli) -> anyhow::Result<()> {
     };
 
     let client = scraper::build_client()?;
-    let (manga, chapters) = resolve_series(&client, &query)?;
+    let (manga, mut chapters) = resolve_series(&client, &query)?;
 
     print_manga_summary(&manga, &chapters);
 
@@ -168,7 +168,7 @@ pub fn run_download(args: Cli) -> anyhow::Result<()> {
 
     let folder_name = get_folder_name(&manga.title);
     let manga_output_dir = args.output.join(folder_name);
-    let (max_width, _, _) = scan_manga_chapters(&manga_output_dir, &manga.title, &chapters);
+    let (max_width, _) = scan_manga_chapters(&manga_output_dir, &manga.title, &mut chapters);
 
     let saved = download_chapters(
         &client,

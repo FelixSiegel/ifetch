@@ -17,27 +17,22 @@ static URL_RE: LazyLock<Regex> =
 static H1_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").unwrap());
 static COVER_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".cover img").unwrap());
 static STATUS_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".status").unwrap());
-static BOOK_LIST_SEL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("#book_list").unwrap());
-static HOT_BOOK_SEL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("#hot_book").unwrap());
+static BOOK_LIST_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("#book_list").unwrap());
+static HOT_BOOK_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("#hot_book").unwrap());
 static SINGLE_BOOK_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("#single_book").unwrap());
-static CHAPTERS_SEL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse(".chapters").unwrap());
+static CHAPTERS_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".chapters").unwrap());
 static ITEM_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".item").unwrap());
 static TITLE_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".title a").unwrap());
 static WRAP_IMG_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".wrap_img img").unwrap());
-static SUMMARY_P_SEL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse(".summary p").unwrap());
+static SUMMARY_P_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".summary p").unwrap());
 static GENRES_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".genres a").unwrap());
 static AUTHORS_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".authors a.author").unwrap());
 static ALT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".alt_name").unwrap());
 static ANCHOR_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
-static RELATED_SEL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("#related").unwrap());
+static RELATED_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("#related").unwrap());
 static RELATION_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".uk-text-success").unwrap());
 
@@ -257,6 +252,7 @@ fn parse_chapter_anchor(
         number,
         label,
         url: joined.to_string(),
+        downloaded: false,
     })
 }
 

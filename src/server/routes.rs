@@ -1,11 +1,12 @@
 use crate::{
     db::{CheckTrigger, get_manga_title, upsert_manga},
+    models::Chapter,
     scraper::{latest_manga, manga_chapters, new_manga, popular_manga, search_manga},
     server::{
-        downloader::queue_background_download,
+        downloader::{MangaDownloadBatch, cancel_download, queue_download_chapters},
         helpers::{
-            accepted_empty, bad_request, image_response, is_valid_segment, json_response,
-            lock_mutex, not_found, parse_chapter_id,
+            bad_request, image_response, is_valid_segment, json_response,
+            json_response_with_status, lock_mutex, method_not_allowed, not_found, parse_chapter_id,
         },
         state::AppState,
     },
@@ -13,50 +14,125 @@ use crate::{
 };
 use anyhow::Result;
 use log::warn;
-use std::{collections::HashMap, io::Cursor, io::Read, path::PathBuf, sync::Arc};
-use tiny_http::Response;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    io::{Cursor, Read},
+    path::PathBuf,
+    sync::Arc,
+};
+use tiny_http::{Method, Response};
+
+#[derive(Debug, Serialize)]
+pub struct MangaDownloadStatus {
+    pub manga_id: String,
+    pub is_downloading: bool,
+    pub queued_count: usize,
+    pub completed_count: usize,
+    pub error_count: usize,
+    pub remaining_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueueSummary {
+    pub active_mangas: usize,
+    pub queued_chapters: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownloadsTelemetryResponse {
+    pub active_downloads: Vec<String>,
+    pub active_count: usize,
+    pub queued_chapters: usize,
+    pub queue_summary: QueueSummary,
+    pub downloads: Vec<MangaDownloadStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueuedDownloadResponse<'a> {
+    status: &'static str,
+    manga_id: &'a str,
+    queued_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CancelledDownloadResponse<'a> {
+    status: &'static str,
+    manga_id: &'a str,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DownloadPayload {
+    #[serde(default)]
+    all: Option<bool>,
+    #[serde(default)]
+    chapters: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    range: Option<String>,
+}
+
+fn require_get<F>(method: &Method, handler: F) -> Result<Response<Cursor<Vec<u8>>>>
+where
+    F: FnOnce() -> Result<Response<Cursor<Vec<u8>>>>,
+{
+    if *method == Method::Get {
+        handler()
+    } else {
+        Ok(method_not_allowed("Method Not Allowed"))
+    }
+}
 
 /// Dispatches incoming HTTP requests to their respective endpoint handlers.
 pub fn handle_route(
+    method: &Method,
     path: &str,
     query: &HashMap<String, String>,
+    body: &[u8],
     state: &Arc<AppState>,
 ) -> Result<Response<Cursor<Vec<u8>>>> {
     let path = path.strip_suffix('/').unwrap_or(path);
 
     if path.is_empty() || path == "/health" {
-        return Ok(Response::from_string("OK").with_header(
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap(),
-        ));
+        return require_get(method, || {
+            Ok(Response::from_string("OK").with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap(),
+            ))
+        });
     }
 
-    if path == "/api/search" {
-        return search(query, state);
+    match path {
+        "/api/search" => return require_get(method, || search(query, state)),
+        "/api/popular" => return require_get(method, || popular(query, state)),
+        "/api/latest" => return require_get(method, || latest(query, state)),
+        "/api/new" => return require_get(method, || new(query, state)),
+        "/api/downloads" => return require_get(method, || downloads_telemetry(state)),
+        _ => {}
     }
-    if path == "/api/popular" {
-        return popular(query, state);
-    }
-    if path == "/api/latest" {
-        return latest(query, state);
-    }
-    if path == "/api/new" {
-        return new(query, state);
-    }
+
     if let Some(rest) = path.strip_prefix("/api/manga/") {
         if let Some(id) = rest.strip_suffix("/chapters") {
-            return manga_chapters_route(id, state);
+            return require_get(method, || manga_chapters_route(id, query, state));
+        }
+        if let Some(id) = rest.strip_suffix("/download") {
+            return match *method {
+                Method::Post => trigger_download(id, body, state),
+                Method::Delete => cancel_download_route(id, state),
+                Method::Get => manga_download_status_route(id, state),
+                _ => Ok(method_not_allowed("Method Not Allowed")),
+            };
         }
         if !rest.contains('/') && !rest.is_empty() {
-            return manga_details(rest, state);
+            return require_get(method, || manga_details(rest, state));
         }
     }
     if let Some(rest) = path.strip_prefix("/api/chapter/")
         && let Some(chap_id) = rest.strip_suffix("/pages")
     {
-        return chapter_pages(chap_id, state);
+        return require_get(method, || chapter_pages(chap_id, state));
     }
     if let Some(rest) = path.strip_prefix("/api/image/") {
-        return image(rest, state);
+        return require_get(method, || image(rest, state));
     }
 
     Ok(not_found("Not Found"))
@@ -112,7 +188,7 @@ const PREFETCH_PAGES: usize = 5;
 fn fetch_or_cache_remote_manga(
     id: &str,
     state: &AppState,
-) -> Result<(crate::models::Manga, Vec<crate::models::Chapter>)> {
+) -> Result<(crate::models::Manga, Vec<Chapter>)> {
     if let Some(cached) = state.cache.get_remote_manga(id) {
         return Ok(cached);
     }
@@ -125,6 +201,16 @@ fn fetch_or_cache_remote_manga(
     Ok((manga, chapters))
 }
 
+/// Cache manga directory mapping if not already present, and return `(folder_name, manga_dir)`.
+fn cache_manga_dir(id: &str, title: &str, state: &AppState) -> PathBuf {
+    let folder = get_folder_name(title);
+    let manga_dir = state.output_dir.join(folder);
+    lock_mutex(&state.cache.manga_dirs)
+        .entry(id.to_string())
+        .or_insert_with(|| (title.to_string(), manga_dir.clone()));
+    manga_dir
+}
+
 /// GET /api/manga/{id}
 /// Returns metadata for the specified manga ID.
 fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
@@ -133,10 +219,7 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
     }
 
     let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
-
-    let folder = get_folder_name(&manga.title);
-    let manga_dir = state.output_dir.join(&folder);
-    lock_mutex(&state.cache.manga_dirs).insert(id.to_string(), (manga.title.clone(), manga_dir));
+    let _ = cache_manga_dir(id, &manga.title, state);
 
     if let Err(e) = upsert_manga(
         &lock_mutex(&state.db),
@@ -156,25 +239,26 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
 }
 
 /// GET /api/manga/{id}/chapters
-/// Returns existing downloaded chapters, and queues a background download if missing chapters exist.
-fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Cursor<Vec<u8>>>> {
+/// Returns remote chapters marked with local download status, without triggering downloads.
+fn manga_chapters_route(
+    id: &str,
+    query: &HashMap<String, String>,
+    state: &Arc<AppState>,
+) -> Result<Response<Cursor<Vec<u8>>>> {
     if !is_valid_segment(id) {
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
-
-    let folder = get_folder_name(&manga.title);
-    let manga_dir = state.output_dir.join(&folder);
-
-    {
-        let mut dirs = lock_mutex(&state.cache.manga_dirs);
-        dirs.insert(id.to_string(), (manga.title.clone(), manga_dir.clone()));
+    let filter_mode = query.get("filter").map(|s| s.as_str()).unwrap_or("all");
+    if !matches!(filter_mode, "all" | "downloaded" | "missing") {
+        return Ok(bad_request("Invalid filter parameter"));
     }
 
-    let (_width, existing_chapters, missing_chapters) =
-        scan_manga_chapters(&manga_dir, &manga.title, &chapters);
-    let has_new = !missing_chapters.is_empty();
+    let (manga, mut chapters) = fetch_or_cache_remote_manga(id, state)?;
+    let manga_dir = cache_manga_dir(id, &manga.title, state);
+
+    let (_width, existing_count) = scan_manga_chapters(&manga_dir, &manga.title, &mut chapters);
+    let has_new = existing_count < chapters.len();
 
     let _ = upsert_manga(
         &lock_mutex(&state.db),
@@ -182,21 +266,199 @@ fn manga_chapters_route(id: &str, state: &Arc<AppState>) -> Result<Response<Curs
         &manga.title,
         &manga.status,
         chapters.len(),
-        Some(existing_chapters.len()),
+        Some(existing_count),
         CheckTrigger::UserRequest {
             new_chapters: has_new,
         },
     );
 
-    if has_new {
-        queue_background_download(id, state, Some((manga, chapters)));
-
-        if existing_chapters.is_empty() {
-            return Ok(accepted_empty());
-        }
+    match filter_mode {
+        "downloaded" => chapters.retain(|c| c.downloaded),
+        "missing" => chapters.retain(|c| !c.downloaded),
+        _ => {}
     }
 
-    json_response(&existing_chapters)
+    json_response(&chapters)
+}
+
+/// POST /api/manga/{id}/download
+/// Triggers explicit download of chapters for a manga.
+fn trigger_download(
+    id: &str,
+    body: &[u8],
+    state: &Arc<AppState>,
+) -> Result<Response<Cursor<Vec<u8>>>> {
+    if !is_valid_segment(id) {
+        return Ok(bad_request("Invalid manga ID"));
+    }
+
+    let payload: DownloadPayload = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        DownloadPayload {
+            all: Some(true),
+            chapters: None,
+            range: None,
+        }
+    } else {
+        match serde_json::from_slice::<DownloadPayload>(body) {
+            Ok(p) => p,
+            Err(e) => return Ok(bad_request(&format!("Invalid JSON body: {}", e))),
+        }
+    };
+
+    if lock_mutex(&state.active_downloads).contains_key(id) {
+        return json_response_with_status(
+            202,
+            &QueuedDownloadResponse {
+                status: "queued",
+                manga_id: id,
+                queued_count: 0,
+            },
+        );
+    }
+
+    let (manga, mut chapters) = fetch_or_cache_remote_manga(id, state)?;
+    let manga_dir = cache_manga_dir(id, &manga.title, state);
+
+    let (max_width, existing_count) = scan_manga_chapters(&manga_dir, &manga.title, &mut chapters);
+
+    let to_download: Vec<Chapter> = if let Some(chap_vals) = payload.chapters {
+        if chap_vals.is_empty() {
+            return Ok(bad_request("Requested chapters not found in manga"));
+        }
+        let mut target_numbers = HashSet::with_capacity(chap_vals.len());
+        for val in chap_vals {
+            let dec = match val {
+                serde_json::Value::String(s) => Decimal::from_str_exact(s.trim())
+                    .map_err(|_| format!("Invalid chapter number: {}", s)),
+                serde_json::Value::Number(n) => {
+                    let s = n.to_string();
+                    Decimal::from_str_exact(&s)
+                        .map_err(|_| format!("Invalid chapter number: {}", s))
+                }
+                _ => return Ok(bad_request("Chapter elements must be numbers or strings")),
+            };
+            match dec {
+                Ok(d) => {
+                    target_numbers.insert(d);
+                }
+                Err(msg) => return Ok(bad_request(&msg)),
+            }
+        }
+
+        let mut matched_any = false;
+        let to_dl: Vec<Chapter> = chapters
+            .iter()
+            .filter(|c| {
+                if target_numbers.contains(&c.number) {
+                    matched_any = true;
+                    !c.downloaded
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect();
+
+        if !matched_any {
+            return Ok(bad_request("Requested chapters not found in manga"));
+        }
+        to_dl
+    } else if let Some(range_str) = payload.range {
+        let matched = match crate::cli::selector::select_chapters(&chapters, &range_str) {
+            Ok(chaps) => chaps,
+            Err(e) => return Ok(bad_request(&format!("Invalid range: {}", e))),
+        };
+
+        matched.into_iter().filter(|c| !c.downloaded).collect()
+    } else if payload.all.unwrap_or(true) {
+        chapters.iter().filter(|c| !c.downloaded).cloned().collect()
+    } else {
+        Vec::new()
+    };
+
+    let queued_count = queue_download_chapters(
+        id,
+        state,
+        MangaDownloadBatch {
+            manga,
+            chapters,
+            to_download,
+            existing_count,
+            max_width,
+            output_dir: manga_dir,
+        },
+    );
+
+    json_response_with_status(
+        202,
+        &QueuedDownloadResponse {
+            status: "queued",
+            manga_id: id,
+            queued_count,
+        },
+    )
+}
+
+/// DELETE /api/manga/{id}/download
+/// Cancels any queued/active downloads for the given manga ID.
+fn cancel_download_route(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
+    if !is_valid_segment(id) {
+        return Ok(bad_request("Invalid manga ID"));
+    }
+
+    let _ = cancel_download(id, state);
+    json_response(&CancelledDownloadResponse {
+        status: "cancelled",
+        manga_id: id,
+    })
+}
+
+/// GET /api/manga/{id}/download
+/// Returns status for this specific manga.
+fn manga_download_status_route(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
+    if !is_valid_segment(id) {
+        return Ok(bad_request("Invalid manga ID"));
+    }
+
+    let status = lock_mutex(&state.active_downloads)
+        .get(id)
+        .map(|tracker| tracker.to_status())
+        .unwrap_or_else(|| MangaDownloadStatus {
+            manga_id: id.to_string(),
+            is_downloading: false,
+            queued_count: 0,
+            completed_count: 0,
+            error_count: 0,
+            remaining_count: 0,
+        });
+
+    json_response(&status)
+}
+
+/// GET /api/downloads
+/// Returns active download IDs and queue summary.
+fn downloads_telemetry(state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
+    let mut downloads: Vec<MangaDownloadStatus> = lock_mutex(&state.active_downloads)
+        .values()
+        .map(|tracker| tracker.to_status())
+        .collect();
+
+    downloads.sort_by(|a, b| a.manga_id.cmp(&b.manga_id));
+
+    let total_queued: usize = downloads.iter().map(|d| d.remaining_count).sum();
+    let active_downloads: Vec<String> = downloads.iter().map(|d| d.manga_id.clone()).collect();
+    let active_count = downloads.len();
+
+    json_response(&DownloadsTelemetryResponse {
+        active_downloads,
+        active_count,
+        queued_chapters: total_queued,
+        queue_summary: QueueSummary {
+            active_mangas: active_count,
+            queued_chapters: total_queued,
+        },
+        downloads,
+    })
 }
 
 /// Resolves and caches the `.cbz` archive path for a chapter.
@@ -210,10 +472,8 @@ fn resolve_chapter_cbz(
         let cbz_map = lock_mutex(&state.cache.chapter_cbz_paths);
         cbz_map.get(chap_id).cloned()
     };
-    if let Some(p) = cached {
-        if p.exists() {
-            return Ok(Some(p));
-        }
+    if let Some(p) = cached.filter(|p| p.exists()) {
+        return Ok(Some(p));
     }
 
     let (title, manga_dir) = resolve_manga(id, state)?;
@@ -387,8 +647,6 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
         manga.title
     };
 
-    let folder = get_folder_name(&title);
-    let dir = state.output_dir.join(folder);
-    lock_mutex(&state.cache.manga_dirs).insert(id.to_string(), (title.clone(), dir.clone()));
+    let dir = cache_manga_dir(id, &title, state);
     Ok((title, dir))
 }

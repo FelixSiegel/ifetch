@@ -28,8 +28,17 @@ pub fn parse_chapter_id(chap_id: &str) -> Option<(&str, &str)> {
 
 /// Builds a 200 OK JSON HTTP response from any serializable payload.
 pub fn json_response<T: serde::Serialize>(data: &T) -> anyhow::Result<Response<Cursor<Vec<u8>>>> {
+    json_response_with_status(200, data)
+}
+
+/// Builds a custom status code JSON HTTP response from any serializable payload.
+pub fn json_response_with_status<T: serde::Serialize>(
+    status: u16,
+    data: &T,
+) -> anyhow::Result<Response<Cursor<Vec<u8>>>> {
     let json = serde_json::to_string(data)?;
     Ok(Response::from_string(json)
+        .with_status_code(status)
         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()))
 }
 
@@ -48,11 +57,14 @@ pub fn not_found(msg: &str) -> Response<Cursor<Vec<u8>>> {
     text_response(404, msg)
 }
 
-/// Returns a 202 Accepted empty HTTP response.
-pub fn accepted_empty() -> Response<Cursor<Vec<u8>>> {
-    Response::from_string("")
-        .with_status_code(202)
-        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap())
+/// Returns a 405 Method Not Allowed HTTP response.
+pub fn method_not_allowed(msg: &str) -> Response<Cursor<Vec<u8>>> {
+    text_response(405, msg)
+}
+
+/// Returns a 413 Payload Too Large HTTP response.
+pub fn payload_too_large(msg: &str) -> Response<Cursor<Vec<u8>>> {
+    text_response(413, msg)
 }
 
 /// Returns an image HTTP response with appropriate Content-Type and immutable caching headers.

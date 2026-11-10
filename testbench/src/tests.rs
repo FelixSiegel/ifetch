@@ -48,6 +48,8 @@ struct ApiChapter {
     number: String,
     label: String,
     url: String,
+    #[serde(default)]
+    downloaded: bool,
 }
 
 pub fn run_all_tests(
@@ -104,6 +106,7 @@ pub fn run_all_tests(
                 "/api/manga/..::1",
                 "/api/manga/..",
                 "/api/manga/../chapters",
+                "/api/manga/../download",
                 "/api/chapter/invalid-no-separator/pages",
                 "/api/chapter/..::1/pages",
                 "/api/chapter/cyber-blade.101::../pages",
@@ -436,31 +439,156 @@ pub fn run_all_tests(
     );
     monitor.record_phase("3. Metadata & TTL Cache", phase_marker);
 
-    // Phase 4: Background Download, Deduplication, Mirror Fallback, Retries & CBZ Creation
+    // Phase 4: Read-Only Chapters, Explicit POST /download, Deduplication & CBZ Creation
     let phase_marker = monitor.mark_phase_start();
     run_case(
         &mut results,
         "Downloader & CBZ",
-        "Initial /chapters returns 202 Accepted, deduplicates concurrent triggers, and completes download",
+        "Initial /chapters is read-only, POST /download triggers queued chapters, and completes download",
         || {
+            // 1. Verify that GET /chapters is strictly read-only and idempotent
             let res = client
                 .get(format!("{}/api/manga/cyber-blade.101/chapters", server_url))
                 .send()?;
             ensure!(
-                res.status() == StatusCode::ACCEPTED,
-                "Expected 202 Accepted when no chapters are local, got {}",
+                res.status() == StatusCode::OK,
+                "Expected 200 OK from read-only GET /chapters, got {}",
                 res.status()
+            );
+            let chaps: Vec<ApiChapter> = res.json()?;
+            ensure!(
+                chaps.len() == 3,
+                "Expected 3 remote chapters, got {}",
+                chaps.len()
+            );
+            ensure!(
+                chaps.iter().all(|c| !c.downloaded),
+                "Expected all chapters to have downloaded=false initially"
+            );
+
+            // Test query parameter filtering
+            let downloaded: Vec<ApiChapter> = client
+                .get(format!(
+                    "{}/api/manga/cyber-blade.101/chapters?filter=downloaded",
+                    server_url
+                ))
+                .send()?
+                .json()?;
+            ensure!(
+                downloaded.is_empty(),
+                "Expected 0 downloaded chapters before download trigger"
+            );
+
+            let missing: Vec<ApiChapter> = client
+                .get(format!(
+                    "{}/api/manga/cyber-blade.101/chapters?filter=missing",
+                    server_url
+                ))
+                .send()?
+                .json()?;
+            ensure!(
+                missing.len() == 3,
+                "Expected 3 missing chapters before download trigger"
+            );
+
+            // Verify telemetry before triggering download
+            let pre_telemetry: serde_json::Value = client
+                .get(format!("{}/api/manga/cyber-blade.101/download", server_url))
+                .send()?
+                .json()?;
+            ensure!(
+                pre_telemetry["is_downloading"] == false,
+                "Expected is_downloading=false before trigger"
+            );
+
+            let all_telemetry: serde_json::Value = client
+                .get(format!("{}/api/downloads", server_url))
+                .send()?
+                .json()?;
+            ensure!(
+                all_telemetry["active_downloads"]
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(false),
+                "Expected active_downloads to be empty before trigger"
+            );
+
+            // Ensure no CBZ files exist yet
+            let manga_dir = output_dir.join("Cyber Blade & Steel");
+            ensure!(
+                !manga_dir.join("Cyber Blade & Steel - Chapter 001.cbz").exists(),
+                "Chapter 001.cbz should not exist before download trigger"
+            );
+
+            // Verify invalid filter returns 400 Bad Request
+            let inv_res = client
+                .get(format!("{}/api/manga/cyber-blade.101/chapters?filter=invalid_filter", server_url))
+                .send()?;
+            ensure!(
+                inv_res.status() == StatusCode::BAD_REQUEST,
+                "Expected 400 Bad Request for invalid filter"
+            );
+
+            // Verify invalid download payloads return 400 Bad Request
+            let bad_json_res = client
+                .post(format!("{}/api/manga/cyber-blade.101/download", server_url))
+                .header("Content-Type", "application/json")
+                .body("invalid json {")
+                .send()?;
+            ensure!(
+                bad_json_res.status() == StatusCode::BAD_REQUEST,
+                "Expected 400 Bad Request for malformed JSON"
+            );
+
+            let bad_range_res = client
+                .post(format!("{}/api/manga/cyber-blade.101/download", server_url))
+                .json(&serde_json::json!({ "range": "10-1" }))
+                .send()?;
+            ensure!(
+                bad_range_res.status() == StatusCode::BAD_REQUEST,
+                "Expected 400 Bad Request for descending range"
+            );
+
+            // 2. Trigger explicit download via POST /api/manga/{id}/download
+            let dl_res = client
+                .post(format!("{}/api/manga/cyber-blade.101/download", server_url))
+                .send()?;
+            ensure!(
+                dl_res.status() == StatusCode::ACCEPTED,
+                "Expected 202 Accepted from POST /download, got {}",
+                dl_res.status()
+            );
+            let dl_json: serde_json::Value = dl_res.json()?;
+            ensure!(
+                dl_json["status"] == "queued",
+                "Expected status=queued, got {:?}",
+                dl_json["status"]
+            );
+            ensure!(
+                dl_json["manga_id"] == "cyber-blade.101",
+                "Expected manga_id=cyber-blade.101"
+            );
+            ensure!(
+                dl_json["queued_count"] == 3,
+                "Expected queued_count=3, got {:?}",
+                dl_json["queued_count"]
             );
 
             // Fire 4 concurrent requests to verify active_downloads deduplication guard
             for _ in 0..4 {
                 let r = client
-                    .get(format!("{}/api/manga/cyber-blade.101/chapters", server_url))
+                    .post(format!("{}/api/manga/cyber-blade.101/download", server_url))
                     .send()?;
                 ensure!(
-                    r.status() == StatusCode::ACCEPTED || r.status() == StatusCode::OK,
-                    "Unexpected status during download: {}",
+                    r.status() == StatusCode::ACCEPTED,
+                    "Expected 202 Accepted during concurrent trigger: {}",
                     r.status()
+                );
+                let dup: serde_json::Value = r.json()?;
+                ensure!(
+                    dup["queued_count"] == 0,
+                    "Expected queued_count=0 for duplicate trigger, got {:?}",
+                    dup["queued_count"]
                 );
             }
 
@@ -469,7 +597,7 @@ pub fn run_all_tests(
             let mut chapters: Vec<ApiChapter> = Vec::new();
             while Instant::now() < deadline {
                 let r = client
-                    .get(format!("{}/api/manga/cyber-blade.101/chapters", server_url))
+                    .get(format!("{}/api/manga/cyber-blade.101/chapters?filter=downloaded", server_url))
                     .send()?;
                 if r.status() == StatusCode::OK {
                     let list: Vec<ApiChapter> = r.json()?;
@@ -486,6 +614,10 @@ pub fn run_all_tests(
                 "Timed out waiting for 3 chapters to download (got {})",
                 chapters.len()
             );
+            ensure!(
+                chapters.iter().all(|c| c.downloaded),
+                "Expected all downloaded chapters to have downloaded=true"
+            );
             let nums: Vec<&str> = chapters.iter().map(|c| c.number.as_str()).collect();
             ensure!(
                 nums == vec!["1", "2", "10.5"],
@@ -501,6 +633,21 @@ pub fn run_all_tests(
             ensure!(
                 upstream.transient_retry_hits.load(Ordering::SeqCst) >= 2,
                 "Expected fetch_single_image retry on HTTP 502"
+            );
+
+            // Verify DELETE /api/manga/{id}/download cancellation endpoint
+            let cancel_res = client
+                .delete(format!("{}/api/manga/cyber-blade.101/download", server_url))
+                .send()?;
+            ensure!(
+                cancel_res.status() == StatusCode::OK,
+                "Expected 200 OK from DELETE /download, got {}",
+                cancel_res.status()
+            );
+            let cancel_json: serde_json::Value = cancel_res.json()?;
+            ensure!(
+                cancel_json["status"] == "cancelled",
+                "Expected status=cancelled"
             );
 
             Ok("Downloaded Ch 1, 2 (?sv=3 mirror + 502 retry), 10.5 (fractional)".to_string())
@@ -760,8 +907,7 @@ pub fn run_all_tests(
             let old_cbz = saga_dir.join("Padding Saga - Chapter 001.cbz");
             create_dummy_cbz(&old_cbz)?;
 
-            // Because Chapter 1 is already present locally, /chapters must return 200 OK immediately
-            // with [Chapter 1] while queueing Chapter 1000 in the background!
+            // Verify that GET /chapters returns both chapters with local status and upgrades padding
             let res = client
                 .get(format!(
                     "{}/api/manga/padding-saga.202/chapters",
@@ -770,13 +916,38 @@ pub fn run_all_tests(
                 .send()?;
             ensure!(
                 res.status() == StatusCode::OK,
-                "Expected 200 OK when 1 of 2 chapters already exists locally, got {}",
+                "Expected 200 OK for /chapters, got {}",
                 res.status()
             );
-            let initial_chaps: Vec<ApiChapter> = res.json()?;
+            let all_chaps: Vec<ApiChapter> = res.json()?;
             ensure!(
-                initial_chaps.len() == 1 && initial_chaps[0].number == "1",
-                "Expected [Ch 1] immediately"
+                all_chaps.len() == 2,
+                "Expected 2 total remote chapters, got {}",
+                all_chaps.len()
+            );
+
+            let downloaded_chaps: Vec<ApiChapter> = client
+                .get(format!(
+                    "{}/api/manga/padding-saga.202/chapters?filter=downloaded",
+                    server_url
+                ))
+                .send()?
+                .json()?;
+            ensure!(
+                downloaded_chaps.len() == 1 && downloaded_chaps[0].number == "1" && downloaded_chaps[0].downloaded,
+                "Expected 1 downloaded chapter [Ch 1]"
+            );
+
+            let missing_chaps: Vec<ApiChapter> = client
+                .get(format!(
+                    "{}/api/manga/padding-saga.202/chapters?filter=missing",
+                    server_url
+                ))
+                .send()?
+                .json()?;
+            ensure!(
+                missing_chaps.len() == 1 && missing_chaps[0].number == "1000" && !missing_chaps[0].downloaded,
+                "Expected 1 missing chapter [Ch 1000]"
             );
 
             // Verify that scan_manga_chapters upgraded `Chapter 001.cbz` -> `Chapter 0001.cbz`
@@ -790,13 +961,41 @@ pub fn run_all_tests(
                 "Old 3-digit Chapter 001.cbz should no longer exist"
             );
 
+            // Test selective chapter download: already downloaded Ch 1 returns queued_count=0
+            let res_ch1 = client
+                .post(format!("{}/api/manga/padding-saga.202/download", server_url))
+                .json(&serde_json::json!({ "chapters": ["1"] }))
+                .send()?;
+            ensure!(res_ch1.status() == StatusCode::ACCEPTED);
+            let ch1_json: serde_json::Value = res_ch1.json()?;
+            ensure!(ch1_json["queued_count"] == 0, "Expected queued_count=0 for already downloaded Ch 1");
+
+            // Trigger selective download of missing chapter via range (Chapter 1000)
+            let res_dl = client
+                .post(format!(
+                    "{}/api/manga/padding-saga.202/download",
+                    server_url
+                ))
+                .json(&serde_json::json!({ "range": "1000" }))
+                .send()?;
+            ensure!(
+                res_dl.status() == StatusCode::ACCEPTED,
+                "Expected 202 Accepted from POST /download"
+            );
+            let dl_json: serde_json::Value = res_dl.json()?;
+            ensure!(
+                dl_json["queued_count"] == 1,
+                "Expected 1 missing chapter queued, got {:?}",
+                dl_json["queued_count"]
+            );
+
             // Wait for background download of Chapter 1000 to finish
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut final_chaps: Vec<ApiChapter> = Vec::new();
             while Instant::now() < deadline {
                 let list: Vec<ApiChapter> = client
                     .get(format!(
-                        "{}/api/manga/padding-saga.202/chapters",
+                        "{}/api/manga/padding-saga.202/chapters?filter=downloaded",
                         server_url
                     ))
                     .send()?

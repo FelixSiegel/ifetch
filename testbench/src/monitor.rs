@@ -62,20 +62,20 @@ impl ProcessMonitor {
         let samples = Arc::new(Mutex::new(Vec::with_capacity(4096)));
         let phase_stats = Arc::new(Mutex::new(Vec::new()));
 
-        if let Some(raw) = read_proc_raw(pid) {
-            if let Ok(mut guard) = samples.lock() {
-                guard.push(ProcSample {
-                    sampled_at: Instant::now(),
-                    cpu_percent: 0.0,
-                    total_cpu_ticks: raw.cpu_ticks,
-                    rss_kb: raw.rss_kb,
-                    hwm_kb: raw.hwm_kb,
-                    vsize_kb: raw.vsize_kb,
-                    threads: raw.threads,
-                    voluntary_ctxt_switches: raw.voluntary_ctxt_switches,
-                    nonvoluntary_ctxt_switches: raw.nonvoluntary_ctxt_switches,
-                });
-            }
+        if let Some(raw) = read_proc_raw(pid)
+            && let Ok(mut guard) = samples.lock()
+        {
+            guard.push(ProcSample {
+                sampled_at: Instant::now(),
+                cpu_percent: 0.0,
+                total_cpu_ticks: raw.cpu_ticks,
+                rss_kb: raw.rss_kb,
+                hwm_kb: raw.hwm_kb,
+                vsize_kb: raw.vsize_kb,
+                threads: raw.threads,
+                voluntary_ctxt_switches: raw.voluntary_ctxt_switches,
+                nonvoluntary_ctxt_switches: raw.nonvoluntary_ctxt_switches,
+            });
         }
 
         let stop_clone = Arc::clone(&stop_flag);

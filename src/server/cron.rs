@@ -34,13 +34,15 @@ pub fn run_cron(state: &Arc<AppState>) {
                 sleep(Duration::from_secs(2));
                 let url = format!("{}/manga/{}", *crate::config::BASE_URL, manga_chk.id);
                 match manga_chapters(&state.client, &url) {
-                    Ok((manga, chapters)) => {
+                    Ok((manga, mut chapters)) => {
                         let folder = get_folder_name(&manga.title);
                         let manga_dir = state.output_dir.join(&folder);
-                        let (_, existing, missing) =
-                            crate::utils::scan_manga_chapters(&manga_dir, &manga.title, &chapters);
-                        let local_count = existing.len();
-                        let did_update = !missing.is_empty();
+                        let (_, local_count) = crate::utils::scan_manga_chapters(
+                            &manga_dir,
+                            &manga.title,
+                            &mut chapters,
+                        );
+                        let did_update = local_count < chapters.len();
                         let _ = upsert_manga(
                             &lock_mutex(&state.db),
                             &manga_chk.id,

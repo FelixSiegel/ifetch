@@ -1,10 +1,10 @@
 use crate::{
     rate_limit::AdaptiveRateLimiter,
-    server::{cache::ServerCache, pool::DownloadPool},
+    server::{cache::ServerCache, downloader::MangaDownloadTracker, pool::DownloadPool},
 };
 use reqwest::blocking::Client;
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -15,8 +15,8 @@ pub struct AppState {
     pub client: Arc<Client>,
     /// Root directory where manga CBZ archives and covers are stored.
     pub output_dir: Arc<PathBuf>,
-    /// Set of manga IDs currently being downloaded in the background to prevent duplicate downloads.
-    pub active_downloads: Arc<Mutex<HashSet<String>>>,
+    /// Map of manga IDs currently being downloaded in the background to prevent duplicate downloads and track progress.
+    pub active_downloads: Arc<Mutex<HashMap<String, Arc<MangaDownloadTracker>>>>,
     /// SQLite database connection for metadata, intervals, and local/remote chapter tracking.
     pub db: Arc<Mutex<rusqlite::Connection>>,
     /// Fixed-worker thread pool executing queued chapter downloads.

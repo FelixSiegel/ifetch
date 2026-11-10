@@ -174,14 +174,21 @@ fn run() -> Result<()> {
     } else {
         // Seed cyber-blade.101 metadata & chapters if running bench_only
         let _ = client
-            .get(format!("{}/api/manga/cyber-blade.101/chapters", server_url))
+            .post(format!("{}/api/manga/cyber-blade.101/download", server_url))
             .send();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if let Ok(r) = client
-                .get(format!("{}/api/manga/cyber-blade.101/chapters", server_url))
+                .get(format!(
+                    "{}/api/manga/cyber-blade.101/chapters?filter=downloaded",
+                    server_url
+                ))
                 .send()
                 && r.status().as_u16() == 200
+                && r.json::<Vec<serde_json::Value>>()
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+                    == 3
             {
                 break;
             }
@@ -451,16 +458,15 @@ fn wait_until_server_ready(
             );
         }
 
-        if discovered_url.is_none() {
-            if let Ok(logs) = fs::read_to_string(server_log) {
-                for line in logs.lines() {
-                    if let Some(idx) = line.find("Server running on http://0.0.0.0:") {
-                        let port_str =
-                            line[idx + "Server running on http://0.0.0.0:".len()..].trim();
-                        if let Ok(port) = port_str.parse::<u16>() {
-                            discovered_url = Some(format!("http://127.0.0.1:{}", port));
-                            break;
-                        }
+        if discovered_url.is_none()
+            && let Ok(logs) = fs::read_to_string(server_log)
+        {
+            for line in logs.lines() {
+                if let Some(idx) = line.find("Server running on http://0.0.0.0:") {
+                    let port_str = line[idx + "Server running on http://0.0.0.0:".len()..].trim();
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        discovered_url = Some(format!("http://127.0.0.1:{}", port));
+                        break;
                     }
                 }
             }

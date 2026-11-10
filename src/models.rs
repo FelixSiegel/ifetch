@@ -1,8 +1,8 @@
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Represents a manga series fetched from MangaKatana or resolved locally.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manga {
     /// Unique identifier / slug of the manga (e.g. "one-piece.12345").
     pub id: String,
@@ -37,7 +37,7 @@ pub struct Manga {
 }
 
 /// Represents a single chapter within a manga series.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chapter {
     /// Decimal chapter number (supports fractional numbers like 10.5).
     pub number: Decimal,
@@ -45,4 +45,7 @@ pub struct Chapter {
     pub label: String,
     /// Direct URL to the chapter reading page on MangaKatana.
     pub url: String,
+    /// Whether the chapter is downloaded locally.
+    #[serde(default)]
+    pub downloaded: bool,
 }
