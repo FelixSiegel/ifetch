@@ -208,6 +208,18 @@ pub fn queue_download_chapters(
         missing_len, id
     );
 
+    let _ = upsert_manga(
+        &lock_mutex(&state.db),
+        id,
+        &tracker.manga.title,
+        &tracker.manga.status,
+        total_chapters,
+        Some(existing_count),
+        CheckTrigger::UserRequest {
+            new_chapters: false,
+        },
+    );
+
     let desc = truncate_str(&tracker.manga.description, 200);
     send_webhook(
         &state.client,

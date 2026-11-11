@@ -1,5 +1,5 @@
 use crate::{
-    db::{CheckTrigger, get_manga_title, upsert_manga},
+    db::{CheckTrigger, get_manga_title, manga_exists, upsert_manga},
     models::Chapter,
     scraper::{
         is_not_found_error, latest_manga, manga_chapters, new_manga, popular_manga, search_manga,
@@ -227,18 +227,21 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
     };
     let _ = cache_manga_dir(id, &manga.title, state);
 
-    if let Err(e) = upsert_manga(
-        &lock_mutex(&state.db),
-        id,
-        &manga.title,
-        &manga.status,
-        chapters.len(),
-        None,
-        CheckTrigger::UserRequest {
-            new_chapters: false,
-        },
-    ) {
-        warn!("Failed to upsert manga {} in database: {}", id, e);
+    let conn = lock_mutex(&state.db);
+    if manga_exists(&conn, id).unwrap_or(false) {
+        if let Err(e) = upsert_manga(
+            &conn,
+            id,
+            &manga.title,
+            &manga.status,
+            chapters.len(),
+            None,
+            CheckTrigger::UserRequest {
+                new_chapters: false,
+            },
+        ) {
+            warn!("Failed to upsert manga {} in database: {}", id, e);
+        }
     }
 
     json_response(&manga)
@@ -270,17 +273,20 @@ fn manga_chapters_route(
     let (_width, existing_count) = scan_manga_chapters(&manga_dir, &manga.title, &mut chapters);
     let has_new = existing_count < chapters.len();
 
-    let _ = upsert_manga(
-        &lock_mutex(&state.db),
-        id,
-        &manga.title,
-        &manga.status,
-        chapters.len(),
-        Some(existing_count),
-        CheckTrigger::UserRequest {
-            new_chapters: has_new,
-        },
-    );
+    let conn = lock_mutex(&state.db);
+    if existing_count > 0 || manga_exists(&conn, id).unwrap_or(false) {
+        let _ = upsert_manga(
+            &conn,
+            id,
+            &manga.title,
+            &manga.status,
+            chapters.len(),
+            Some(existing_count),
+            CheckTrigger::UserRequest {
+                new_chapters: has_new,
+            },
+        );
+    }
 
     match filter_mode {
         "downloaded" => chapters.retain(|c| c.downloaded),
@@ -650,22 +656,11 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<Option<(String, PathBuf)>
     let title = if let Some(title) = maybe_title {
         title
     } else {
-        let (manga, chapters) = match fetch_or_cache_remote_manga(id, state) {
+        let (manga, _chapters) = match fetch_or_cache_remote_manga(id, state) {
             Ok(res) => res,
             Err(e) if is_not_found_error(&e) => return Ok(None),
             Err(e) => return Err(e),
         };
-        let _ = upsert_manga(
-            &lock_mutex(&state.db),
-            id,
-            &manga.title,
-            &manga.status,
-            chapters.len(),
-            None,
-            CheckTrigger::UserRequest {
-                new_chapters: false,
-            },
-        );
         manga.title
     };
 

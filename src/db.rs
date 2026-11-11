@@ -72,6 +72,12 @@ pub enum CheckTrigger {
     DownloadComplete { success: bool },
 }
 
+/// Checks whether a manga with the given ID exists in the database.
+pub fn manga_exists(conn: &Connection, id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT 1 FROM mangas WHERE id = ?1")?;
+    stmt.exists(params![id])
+}
+
 /// Inserts or updates manga metadata and next-check scheduling intervals in the database.
 ///
 /// Uses an adaptive exponential backoff for periodic cron checks when no new chapters are found,

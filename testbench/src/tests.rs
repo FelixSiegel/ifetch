@@ -546,6 +546,19 @@ pub fn run_all_tests(
                 "Chapter 001.cbz should not exist before download trigger"
             );
 
+            // Verify that informational GET requests did not insert cyber-blade.101 into library.db before download trigger
+            let db_path = config_dir.join("library.db");
+            if db_path.exists() {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                let exists: bool = conn
+                    .prepare("SELECT 1 FROM mangas WHERE id = 'cyber-blade.101'")?
+                    .exists([])?;
+                ensure!(
+                    !exists,
+                    "cyber-blade.101 should not be in library.db before explicit download trigger"
+                );
+            }
+
             // Verify invalid filter returns 400 Bad Request
             let inv_res = client
                 .get(format!(
