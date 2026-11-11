@@ -109,6 +109,9 @@ ifetch "Chainsaw Man" --list
 ifetch --server --port 8080 --output ./downloads --config ./config
 ```
 
+> [!NOTE] 
+> REST API endpoint documentation and a runnable [Bruno](https://usebruno.com) collection are available in [`docs/api/`](docs/api).
+
 ### Configuration & Environment Variables
 
 | Variable                | CLI Flag          | Default     | Description                                                     |
