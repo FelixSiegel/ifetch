@@ -1,0 +1,40 @@
+meta {
+  name: Get Chapter Image
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/image/:chap_id/:filename
+  body: none
+  auth: none
+}
+
+params:path {
+  chap_id: one-piece.49::1
+  filename: 001.jpg
+}
+
+assert {
+  res.status: in [200, 404]
+}
+
+docs {
+  # Get Chapter Image
+  Extracts and serves an individual page image directly from the chapter's CBZ archive.
+
+  ### Features
+  - **In-Memory LRU Cache**: Frequently read pages are cached in memory for sub-millisecond retrieval.
+  - **Read-Ahead Prefetching**: Automatically decompresses and caches the next 5 consecutive pages in the background for smooth reading experience in Mihon/Tachiyomi.
+  - **Magic-Byte MIME Sniffing**: Returns accurate `Content-Type` headers (`image/jpeg`, `image/png`, `image/webp`).
+
+  ### Path Parameters
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | `chap_id` | string | **Yes** | Compound chapter identifier (e.g. `one-piece.49::1`). |
+  | `filename` | string | **Yes** | Filename inside the CBZ archive (e.g. `001.jpg`). |
+
+  ### Responses
+  - **`200 OK`**: Binary image stream with appropriate `Content-Type` header (`image/jpeg`, `image/png`, `image/webp`).
+  - **`404 Not Found`**: Chapter archive or image file not found.
+}

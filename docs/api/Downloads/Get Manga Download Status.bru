@@ -1,0 +1,42 @@
+meta {
+  name: Get Manga Download Status
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/manga/:id/download
+  body: none
+  auth: none
+}
+
+params:path {
+  id: one-piece.49
+}
+
+assert {
+  res.status: in [200, 400]
+}
+
+docs {
+  # Get Manga Download Status
+  Queries the live progress and status of an active or completed background download task for a given manga.
+
+  ### Path Parameters
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | `id` | string | **Yes** | Manga Katana slug identifier (e.g. `one-piece.49`). |
+
+  ### Responses
+  - **`200 OK`**: Current progress status.
+    ```json
+    {
+      "manga_id": "one-piece.49",
+      "is_downloading": true,
+      "queued_count": 10,
+      "completed_count": 3,
+      "error_count": 0,
+      "remaining_count": 7
+    }
+    ```
+}

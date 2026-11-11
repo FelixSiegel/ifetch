@@ -1,0 +1,33 @@
+meta {
+  name: Popular Manga
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/popular?page=1
+  body: none
+  auth: none
+}
+
+params:query {
+  page: 1
+}
+
+assert {
+  res.status: eq 200
+  res.body: isDefined
+}
+
+docs {
+  # Popular Manga
+  Retrieves the most popular/trending manga from MangaKatana with pagination support.
+
+  ### Query Parameters
+  | Parameter | Type | Required | Default | Description |
+  |-----------|------|----------|---------|-------------|
+  | `page` | integer | No | `1` | Page number to fetch (aliases: `page`, `p`). Must be $\ge 1$. |
+
+  ### Responses
+  - **`200 OK`**: JSON array of popular manga items with covers, status, and metadata.
+}

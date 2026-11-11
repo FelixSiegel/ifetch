@@ -1,0 +1,60 @@
+meta {
+  name: List Manga Chapters
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/manga/:id/chapters?filter=all
+  body: none
+  auth: none
+}
+
+params:path {
+  id: one-piece.49
+}
+
+params:query {
+  filter: all
+}
+
+assert {
+  res.status: in [200, 404]
+}
+
+docs {
+  # List Manga Chapters
+  Returns the complete list of chapters for a manga, annotated with local CBZ archive download status (`downloaded: true/false`).
+
+  > **Note**: Unlike older versions of iFetch, calling this endpoint **does not** trigger automatic background downloads. To download chapters, use `POST /api/manga/:id/download`.
+
+  ### Path Parameters
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | `id` | string | **Yes** | Manga Katana slug identifier (e.g. `one-piece.49`). |
+
+  ### Query Parameters
+  | Parameter | Type | Required | Default | Allowed Values | Description |
+  |-----------|------|----------|---------|----------------|-------------|
+  | `filter` | string | No | `all` | `all`, `downloaded`, `missing` | Filters the returned chapter list by download status. |
+
+  ### Responses
+  - **`200 OK`**: JSON array of chapters.
+    ```json
+    [
+      {
+        "number": "1",
+        "title": "Romance Dawn",
+        "url": "https://mangakatana.com/manga/one-piece.49/c1",
+        "downloaded": true
+      },
+      {
+        "number": "2",
+        "title": "They Call Him 'Straw Hat Luffy'",
+        "url": "https://mangakatana.com/manga/one-piece.49/c2",
+        "downloaded": false
+      }
+    ]
+    ```
+  - **`400 Bad Request`**: If `id` or `filter` query parameter is invalid.
+}

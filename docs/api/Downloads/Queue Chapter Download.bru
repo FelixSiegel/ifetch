@@ -1,0 +1,69 @@
+meta {
+  name: Queue Chapter Download
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/manga/:id/download
+  body: json
+  auth: none
+}
+
+params:path {
+  id: three-days-of-happiness.19725
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "range": "1-5"
+  }
+}
+
+assert {
+  res.status: in [202, 400, 404]
+}
+
+docs {
+  # Queue Chapter Download
+  Dispatches a background download job for missing chapters of a manga.
+
+  ### Path Parameters
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | `id` | string | **Yes** | Manga Katana slug identifier (e.g. `one-piece.49`). |
+
+  ### Request Body (Optional JSON)
+  You can customize which chapters to queue using one of the following formats:
+
+  1. **Download Specific Range** (CLI range syntax):
+     ```json
+     {
+       "range": "1-10,15.5"
+     }
+     ```
+  2. **Download Specific Chapter List**:
+     ```json
+     {
+       "chapters": [1, 2, "3.5"]
+     }
+     ```
+  3. **Download All Missing Chapters**:
+     Pass `{}` or omit the body entirely.
+
+  ### Responses
+  - **`202 Accepted`**: Job successfully enqueued or already running.
+    ```json
+    {
+      "status": "queued",
+      "manga_id": "one-piece.49",
+      "queued_count": 5
+    }
+    ```
+  - **`400 Bad Request`**: Malformed JSON or invalid chapter range selector.
+  - **`404 Not Found`**: Manga not found upstream.
+}

@@ -1,0 +1,45 @@
+meta {
+  name: List Active Downloads
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/downloads
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+  res.body: isDefined
+}
+
+docs {
+  # List Active Downloads
+  Returns overall download queue telemetry across all manga series, including total active downloads and per-series progress.
+
+  ### Responses
+  - **`200 OK`**:
+    ```json
+    {
+      "active_downloads": ["one-piece.49"],
+      "active_count": 1,
+      "queued_chapters": 7,
+      "queue_summary": {
+        "active_mangas": 1,
+        "queued_chapters": 7
+      },
+      "downloads": [
+        {
+          "manga_id": "one-piece.49",
+          "is_downloading": true,
+          "queued_count": 10,
+          "completed_count": 3,
+          "error_count": 0,
+          "remaining_count": 7
+        }
+      ]
+    }
+    ```
+}

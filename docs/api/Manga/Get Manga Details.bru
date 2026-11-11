@@ -1,0 +1,47 @@
+meta {
+  name: Get Manga Details
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/manga/:id
+  body: none
+  auth: none
+}
+
+params:path {
+  id: one-piece.49
+}
+
+assert {
+  res.status: in [200, 404]
+}
+
+docs {
+  # Get Manga Details
+  Fetches full metadata and chapter count for the specified manga ID. Also registers the series in the local SQLite state tracker (`library.db`).
+
+  ### Path Parameters
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | `id` | string | **Yes** | Manga Katana slug identifier (e.g. `one-piece.49`). |
+
+  ### Responses
+  - **`200 OK`**: JSON object containing manga details.
+    ```json
+    {
+      "id": "one-piece.49",
+      "title": "One Piece",
+      "alt_titles": ["OP"],
+      "description": "Gol D. Roger...",
+      "authors": ["Oda Eiichiro"],
+      "artists": ["Oda Eiichiro"],
+      "genres": ["Action", "Adventure"],
+      "status": "Ongoing",
+      "cover_url": "https://img.mangakatana.com/covers/..."
+    }
+    ```
+  - **`400 Bad Request`**: If the manga ID contains illegal path characters.
+  - **`404 Not Found`**: If the manga is not found upstream.
+}

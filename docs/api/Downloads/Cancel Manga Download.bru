@@ -1,0 +1,38 @@
+meta {
+  name: Cancel Manga Download
+  type: http
+  seq: 3
+}
+
+delete {
+  url: {{baseUrl}}/api/manga/:id/download
+  body: none
+  auth: none
+}
+
+params:path {
+  id: one-piece.49
+}
+
+assert {
+  res.status: in [200, 400]
+}
+
+docs {
+  # Cancel Manga Download
+  Cancels any queued or in-flight background chapter downloads for the specified manga ID.
+
+  ### Path Parameters
+  | Parameter | Type | Required | Description |
+  |-----------|------|----------|-------------|
+  | `id` | string | **Yes** | Manga Katana slug identifier (e.g. `one-piece.49`). |
+
+  ### Responses
+  - **`200 OK`**:
+    ```json
+    {
+      "status": "cancelled",
+      "manga_id": "one-piece.49"
+    }
+    ```
+}

@@ -1,0 +1,40 @@
+meta {
+  name: Get Chapter Pages
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/chapter/:chap_id/pages
+  body: none
+  auth: none
+}
+
+params:path {
+  chap_id: one-piece.49::1
+}
+
+assert {
+  res.status: in [200, 404]
+}
+
+docs {
+  # Get Chapter Pages
+  Returns a sorted list of relative image URL paths for all pages archived inside a downloaded chapter's CBZ container.
+
+  ### Path Parameters
+  | Parameter | Type | Required | Format | Description |
+  |-----------|------|----------|--------|-------------|
+  | `chap_id` | string | **Yes** | `{manga_id}::{chapter_number}` | Compound chapter identifier (e.g. `one-piece.49::1` or `bleach.123::10.5`). |
+
+  ### Responses
+  - **`200 OK`**: JSON array of relative page image paths.
+    ```json
+    [
+      "/api/image/one-piece.49::1/001.jpg",
+      "/api/image/one-piece.49::1/002.jpg",
+      "/api/image/one-piece.49::1/003.jpg"
+    ]
+    ```
+  - **`404 Not Found`**: Returned if the chapter CBZ archive has not been downloaded yet.
+}

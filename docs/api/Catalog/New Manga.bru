@@ -1,0 +1,33 @@
+meta {
+  name: New Manga
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/new?page=1
+  body: none
+  auth: none
+}
+
+params:query {
+  page: 1
+}
+
+assert {
+  res.status: eq 200
+  res.body: isDefined
+}
+
+docs {
+  # New Manga Releases
+  Returns newly cataloged manga releases from MangaKatana.
+
+  ### Query Parameters
+  | Parameter | Type | Required | Default | Description |
+  |-----------|------|----------|---------|-------------|
+  | `page` | integer | No | `1` | Page number to fetch (aliases: `page`, `p`). Must be $\ge 1$. |
+
+  ### Responses
+  - **`200 OK`**: JSON array of new manga items.
+}

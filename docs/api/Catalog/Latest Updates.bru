@@ -1,0 +1,33 @@
+meta {
+  name: Latest Updates
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/latest?page=1
+  body: none
+  auth: none
+}
+
+params:query {
+  page: 1
+}
+
+assert {
+  res.status: eq 200
+  res.body: isDefined
+}
+
+docs {
+  # Latest Manga Updates
+  Returns the most recently updated manga releases from MangaKatana.
+
+  ### Query Parameters
+  | Parameter | Type | Required | Default | Description |
+  |-----------|------|----------|---------|-------------|
+  | `page` | integer | No | `1` | Page number to fetch (aliases: `page`, `p`). Must be $\ge 1$. |
+
+  ### Responses
+  - **`200 OK`**: JSON array of recently updated manga items.
+}

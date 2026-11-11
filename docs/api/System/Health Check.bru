@@ -1,0 +1,24 @@
+meta {
+  name: Health Check
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/health
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+  res.body: eq OK
+}
+
+docs {
+  # Server Health Check
+  Quick probe to verify that the HTTP server is running and responsive.
+
+  ### Responses
+  - `200 OK`: Server is healthy (`text/plain: OK`).
+}
