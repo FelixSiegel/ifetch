@@ -2,7 +2,7 @@ use crate::{
     models::{Chapter, Manga},
     utils::{CHAPTER_RE, MANGA_RE},
 };
-use anyhow::{Result, bail};
+use anyhow::Result;
 use regex::Regex;
 use rust_decimal::Decimal;
 use scraper::{ElementRef, Html, Selector};
@@ -415,7 +415,10 @@ pub fn parse_manga_page(
     chapters.dedup_by(|a, b| a.number == b.number);
 
     if chapters.is_empty() {
-        bail!("No chapters found on manga page");
+        return Err(super::MangaNotFoundError {
+            message: format!("No chapters found on manga page at {}", url),
+        }
+        .into());
     }
     Ok((manga, chapters))
 }

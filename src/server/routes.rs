@@ -1,7 +1,9 @@
 use crate::{
     db::{CheckTrigger, get_manga_title, upsert_manga},
     models::Chapter,
-    scraper::{latest_manga, manga_chapters, new_manga, popular_manga, search_manga},
+    scraper::{
+        is_not_found_error, latest_manga, manga_chapters, new_manga, popular_manga, search_manga,
+    },
     server::{
         downloader::{MangaDownloadBatch, cancel_download, queue_download_chapters},
         helpers::{
@@ -218,7 +220,11 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
+    let (manga, chapters) = match fetch_or_cache_remote_manga(id, state) {
+        Ok(res) => res,
+        Err(e) if is_not_found_error(&e) => return Ok(not_found("Manga not found")),
+        Err(e) => return Err(e),
+    };
     let _ = cache_manga_dir(id, &manga.title, state);
 
     if let Err(e) = upsert_manga(
@@ -254,7 +260,11 @@ fn manga_chapters_route(
         return Ok(bad_request("Invalid filter parameter"));
     }
 
-    let (manga, mut chapters) = fetch_or_cache_remote_manga(id, state)?;
+    let (manga, mut chapters) = match fetch_or_cache_remote_manga(id, state) {
+        Ok(res) => res,
+        Err(e) if is_not_found_error(&e) => return Ok(not_found("Manga not found")),
+        Err(e) => return Err(e),
+    };
     let manga_dir = cache_manga_dir(id, &manga.title, state);
 
     let (_width, existing_count) = scan_manga_chapters(&manga_dir, &manga.title, &mut chapters);
@@ -316,7 +326,11 @@ fn trigger_download(
         );
     }
 
-    let (manga, mut chapters) = fetch_or_cache_remote_manga(id, state)?;
+    let (manga, mut chapters) = match fetch_or_cache_remote_manga(id, state) {
+        Ok(res) => res,
+        Err(e) if is_not_found_error(&e) => return Ok(not_found("Manga not found")),
+        Err(e) => return Err(e),
+    };
     let manga_dir = cache_manga_dir(id, &manga.title, state);
 
     let (max_width, existing_count) = scan_manga_chapters(&manga_dir, &manga.title, &mut chapters);
@@ -476,7 +490,9 @@ fn resolve_chapter_cbz(
         return Ok(Some(p));
     }
 
-    let (title, manga_dir) = resolve_manga(id, state)?;
+    let Some((title, manga_dir)) = resolve_manga(id, state)? else {
+        return Ok(None);
+    };
     let Some(cbz_path) = find_chapter_cbz(&manga_dir, &title, number) else {
         return Ok(None);
     };
@@ -621,9 +637,9 @@ fn image(rest: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>> {
 }
 
 /// Resolves a manga ID to its title and output directory, consulting the cache and database.
-fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
+fn resolve_manga(id: &str, state: &AppState) -> Result<Option<(String, PathBuf)>> {
     if let Some(entry) = lock_mutex(&state.cache.manga_dirs).get(id).cloned() {
-        return Ok(entry);
+        return Ok(Some(entry));
     }
 
     let maybe_title = {
@@ -634,7 +650,11 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
     let title = if let Some(title) = maybe_title {
         title
     } else {
-        let (manga, chapters) = fetch_or_cache_remote_manga(id, state)?;
+        let (manga, chapters) = match fetch_or_cache_remote_manga(id, state) {
+            Ok(res) => res,
+            Err(e) if is_not_found_error(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let _ = upsert_manga(
             &lock_mutex(&state.db),
             id,
@@ -650,5 +670,5 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<(String, PathBuf)> {
     };
 
     let dir = cache_manga_dir(id, &title, state);
-    Ok((title, dir))
+    Ok(Some((title, dir)))
 }

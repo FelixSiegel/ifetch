@@ -12,8 +12,28 @@ use crate::{
     rate_limit::{RateLimitError, is_rate_limited_response},
 };
 use anyhow::{Result, bail};
+use std::fmt;
 use ureq::ResponseExt;
 use url::Url;
+
+/// Error indicating that a manga series was not found upstream (HTTP 404 or missing page).
+#[derive(Debug)]
+pub struct MangaNotFoundError {
+    pub message: String,
+}
+
+impl fmt::Display for MangaNotFoundError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Manga not found: {}", self.message)
+    }
+}
+
+impl std::error::Error for MangaNotFoundError {}
+
+/// Returns true if the error represents an upstream 404 / manga not found condition.
+pub fn is_not_found_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<MangaNotFoundError>().is_some()
+}
 
 /// Searches MangaKatana for manga matching the given query keyword.
 ///
@@ -57,6 +77,12 @@ pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>
     let text = res.body_mut().read_to_string()?;
     if is_rate_limited_response(status, &text) {
         return Err(RateLimitError::new("Manga page blocked or rate limited").into());
+    }
+    if status == http::StatusCode::NOT_FOUND {
+        return Err(MangaNotFoundError {
+            message: format!("HTTP 404 at {}", url),
+        }
+        .into());
     }
     if !status.is_success() {
         bail!("HTTP error {} fetching manga from {}", status, url);

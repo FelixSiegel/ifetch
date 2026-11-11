@@ -158,12 +158,15 @@ pub fn run_server(
                     Ok(Err(e)) => {
                         error!("Error handling request {}: {}", path, e);
                         let is_rate_limit = crate::rate_limit::is_rate_limit_error(&e);
+                        let is_not_found = crate::scraper::is_not_found_error(&e);
                         let status_code = if is_rate_limit {
                             let retry_after = crate::rate_limit::extract_retry_after(&e);
                             state
                                 .rate_limiter
                                 .on_rate_limit_hit_with_retry(&e.to_string(), retry_after);
                             429
+                        } else if is_not_found {
+                            404
                         } else {
                             500
                         };
