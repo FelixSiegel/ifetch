@@ -1,7 +1,5 @@
-use reqwest::blocking::Client;
+use crate::{scraper::Client, utils::truncate_str};
 use serde::Serialize;
-
-use crate::utils::truncate_str;
 
 #[derive(Serialize)]
 pub struct WebhookPayload<'a> {
@@ -213,11 +211,11 @@ pub fn send_webhook(client: &Client, notify_type: NotificationType) {
         embeds: vec![embed],
     };
 
-    match client.post(webhook_url).json(&payload).send() {
-        Ok(res) => {
+    match client.post(webhook_url).send_json(&payload) {
+        Ok(mut res) => {
             if !res.status().is_success() {
                 log::error!("Discord webhook failed with status: {}", res.status());
-                if let Ok(text) = res.text() {
+                if let Ok(text) = res.body_mut().read_to_string() {
                     log::error!("Discord response: {}", text);
                 }
             }

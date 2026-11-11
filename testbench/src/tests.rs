@@ -1,6 +1,6 @@
-use crate::{mock_upstream::MockUpstream, monitor::ProcessMonitor};
+use crate::{client::Client, mock_upstream::MockUpstream, monitor::ProcessMonitor};
 use anyhow::{Context, Result, ensure};
-use reqwest::{StatusCode, blocking::Client};
+use http::StatusCode;
 use serde::Deserialize;
 use std::{
     fs::{self, File},

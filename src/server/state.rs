@@ -1,8 +1,8 @@
 use crate::{
     rate_limit::AdaptiveRateLimiter,
+    scraper::Client,
     server::{cache::ServerCache, downloader::MangaDownloadTracker, pool::DownloadPool},
 };
-use reqwest::blocking::Client;
 use std::{
     collections::HashMap,
     path::PathBuf,

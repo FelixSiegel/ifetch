@@ -1,4 +1,4 @@
-use reqwest::StatusCode;
+use http::{HeaderMap, StatusCode, header::RETRY_AFTER};
 use std::time::Duration;
 
 const CHALLENGE_MARKERS: &[&str] = &[
@@ -44,9 +44,9 @@ impl std::fmt::Display for RateLimitError {
 impl std::error::Error for RateLimitError {}
 
 /// Parses the standard HTTP `Retry-After` header (in seconds) if present in response headers.
-pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers
-        .get(reqwest::header::RETRY_AFTER)
+        .get(RETRY_AFTER)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
@@ -77,7 +77,9 @@ pub fn is_rate_limited_response(status: StatusCode, body: &str) -> bool {
 pub fn is_rate_limit_error(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         cause.downcast_ref::<RateLimitError>().is_some() ||
-        cause.downcast_ref::<reqwest::Error>().is_some_and(
-            |req_err| req_err.status() == Some(StatusCode::TOO_MANY_REQUESTS))
+        cause.downcast_ref::<ureq::Error>().is_some_and(|req_err| match req_err {
+            ureq::Error::StatusCode(code) => *code == 429,
+            _ => false,
+        })
     })
 }

@@ -9,12 +9,11 @@ pub use image::*;
 use crate::{
     models::{Chapter, Manga},
     rate_limit::{self, AdaptiveRateLimiter, is_rate_limit_error},
-    scraper::chapter_images,
+    scraper::{Client, chapter_images},
     utils::chapter_filename,
 };
 use anyhow::Result;
 use indicatif::ProgressBar;
-use reqwest::blocking::Client;
 use std::{
     path::{Path, PathBuf},
     time::Duration,

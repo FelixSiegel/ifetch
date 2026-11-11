@@ -3,12 +3,11 @@ use crate::{
     cli::{Cli, choose_manga, prompt_chapters, prompt_manga, selector::select_chapters},
     models::{Chapter, Manga},
     rate_limit::AdaptiveRateLimiter,
-    scraper,
+    scraper::{self, Client},
     utils::{get_folder_name, scan_manga_chapters, series_url, truncate_str},
 };
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::blocking::Client;
 use std::{
     path::Path,
     sync::atomic::{AtomicUsize, Ordering},

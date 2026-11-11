@@ -1,7 +1,7 @@
 pub mod client;
 pub mod parser;
 
-pub use client::{build_client, chapter_images};
+pub use client::{Client, build_client, chapter_images};
 pub use parser::{
     extract_image_urls, parse_book_list, parse_hot_manga, parse_latest_manga,
     parse_manga_items_from_container, parse_manga_page, parse_search_results,
@@ -12,7 +12,7 @@ use crate::{
     rate_limit::{RateLimitError, is_rate_limited_response},
 };
 use anyhow::{Result, bail};
-use reqwest::blocking::Client;
+use ureq::ResponseExt;
 use url::Url;
 
 /// Searches MangaKatana for manga matching the given query keyword.
@@ -20,14 +20,17 @@ use url::Url;
 /// Returns a list of matching `Manga` entries, or an error if rate-limited or unavailable.
 pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
     let base_url = format!("{}/", *crate::config::BASE_URL);
-    let res = client
-        .get(Url::parse_with_params(&base_url, &[("search", query)])?)
-        .send()?;
+    let search_url = Url::parse_with_params(&base_url, &[("search", query)])?;
+    let mut res = client.get(search_url.as_str()).call()?;
     let status = res.status();
-    let url = res.url().clone();
+    let effective_uri = res
+        .get_redirect_history()
+        .and_then(|h| h.last())
+        .unwrap_or_else(|| res.get_uri());
+    let url = Url::parse(&effective_uri.to_string())?;
     let path = url.path().trim_end_matches('/');
 
-    let text = res.text()?;
+    let text = res.body_mut().read_to_string()?;
     if is_rate_limited_response(status, &text) {
         return Err(RateLimitError::new("Search blocked or rate limited").into());
     }
@@ -44,10 +47,14 @@ pub fn search_manga(client: &Client, query: &str) -> Result<Vec<Manga>> {
 
 /// Fetches manga metadata and the complete sorted list of chapters from a series URL.
 pub fn manga_chapters(client: &Client, url: &str) -> Result<(Manga, Vec<Chapter>)> {
-    let res = client.get(url).send()?;
+    let mut res = client.get(url).call()?;
     let status = res.status();
-    let effective_url = res.url().clone();
-    let text = res.text()?;
+    let effective_uri = res
+        .get_redirect_history()
+        .and_then(|h| h.last())
+        .unwrap_or_else(|| res.get_uri());
+    let effective_url = Url::parse(&effective_uri.to_string())?;
+    let text = res.body_mut().read_to_string()?;
     if is_rate_limited_response(status, &text) {
         return Err(RateLimitError::new("Manga page blocked or rate limited").into());
     }
@@ -67,13 +74,13 @@ fn fetch_book_list(client: &Client, endpoint: &str, page: usize) -> Result<Vec<M
     } else {
         format!("{}/{}/page/{}", *crate::config::BASE_URL, endpoint, page)
     };
-    let res = client.get(&url).send()?;
+    let mut res = client.get(&url).call()?;
     let status = res.status();
-    let text = res.text()?;
+    let text = res.body_mut().read_to_string()?;
     if is_rate_limited_response(status, &text) {
         return Err(RateLimitError::new(format!("Blocked or rate limited on {}", endpoint)).into());
     }
-    if status == reqwest::StatusCode::NOT_FOUND {
+    if status == http::StatusCode::NOT_FOUND {
         return Ok(Vec::new());
     }
     if !status.is_success() {
@@ -99,9 +106,9 @@ pub fn popular_manga(client: &Client, page: usize) -> Result<Vec<Manga>> {
     }
     let base_url = format!("{}/", *crate::config::BASE_URL);
     let url = format!("{}/", *crate::config::BASE_URL);
-    let res = client.get(&url).send()?;
+    let mut res = client.get(&url).call()?;
     let status = res.status();
-    let text = res.text()?;
+    let text = res.body_mut().read_to_string()?;
     if is_rate_limited_response(status, &text) {
         return Err(RateLimitError::new("Popular manga blocked or rate limited").into());
     }

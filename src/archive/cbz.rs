@@ -1,11 +1,11 @@
 use crate::{
     archive::{comic_info::generate_comic_info, image::fetch_single_image},
     models::{Chapter, Manga},
+    scraper::Client,
     utils::image_extension,
 };
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
-use reqwest::blocking::Client;
 use std::{
     fs::File,
     io::{BufWriter, Write},

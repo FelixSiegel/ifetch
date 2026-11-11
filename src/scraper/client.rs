@@ -1,26 +1,21 @@
 use super::parser::extract_image_urls;
 use crate::rate_limit::{self, RateLimitError, is_rate_limited_response};
-use anyhow::{Context, Result};
-use reqwest::{
-    blocking::Client,
-    header::{HeaderMap, HeaderValue, USER_AGENT},
-};
+use anyhow::Result;
 use std::time::Duration;
+use ureq::Agent;
+
+pub type Client = Agent;
 
 pub fn build_client() -> Result<Client> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-        ),
-    );
+    let config = ureq::config::Config::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36")
+        .timeout_global(Some(Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .save_redirect_history(true)
+        .max_redirects(10)
+        .build();
 
-    Client::builder()
-        .default_headers(headers)
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("Failed to build HTTP client")
+    Ok(config.new_agent())
 }
 
 /// Mirror query suffixes probed sequentially on MangaKatana.
@@ -33,7 +28,7 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
 
     for suffix in MIRROR_SUFFIXES {
         let url = format!("{}{}", chapter_url, suffix);
-        let res = match client.get(&url).send() {
+        let mut res = match client.get(&url).call() {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("Failed request to {}: {}", url, e);
@@ -47,7 +42,7 @@ pub fn chapter_images(client: &Client, chapter_url: &str) -> Result<Vec<String>>
             last_retry_after = Some(retry_after);
         }
 
-        let text = match res.text() {
+        let text = match res.body_mut().read_to_string() {
             Ok(t) => t,
             Err(_) => {
                 last_err_msg = format!("failed reading body from {}", url);

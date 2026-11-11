@@ -1,6 +1,5 @@
-use crate::monitor::ProcessMonitor;
+use crate::{client::Client, monitor::ProcessMonitor};
 use anyhow::Result;
-use reqwest::blocking::Client;
 use std::{
     fs::File,
     io::Write,

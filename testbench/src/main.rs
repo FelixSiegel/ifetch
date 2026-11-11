@@ -1,4 +1,5 @@
 mod benchmarks;
+mod client;
 mod mock_upstream;
 mod monitor;
 mod tests;
@@ -6,10 +7,10 @@ mod tests;
 use anyhow::{Context, Result, bail};
 use benchmarks::{BenchmarkResult, run_all_benchmarks};
 use clap::Parser;
+use client::Client;
 use console::style;
 use mock_upstream::MockUpstream;
 use monitor::{ProcessMonitor, ResourceStats};
-use reqwest::blocking::Client;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -138,10 +139,7 @@ fn run() -> Result<()> {
         workspace_dir: workspace_dir.clone(),
     };
 
-    let client = Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = Client::new();
 
     let server_url = wait_until_server_ready(&client, &mut guard.child, &server_log)?;
     println!(
