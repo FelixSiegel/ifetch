@@ -186,13 +186,13 @@ fn new(query: &HashMap<String, String>, state: &AppState) -> Result<Response<Cur
 
 const PREFETCH_PAGES: usize = 5;
 
-/// Fetches `(Manga, Vec<Chapter>)` from the short-lived TTL cache or scrapes MangaKatana on a miss.
+/// Fetches `(Manga, Vec<Chapter>, is_cached)` from the short-lived TTL cache or scrapes MangaKatana on a miss.
 fn fetch_or_cache_remote_manga(
     id: &str,
     state: &AppState,
-) -> Result<(crate::models::Manga, Vec<Chapter>)> {
-    if let Some(cached) = state.cache.get_remote_manga(id) {
-        return Ok(cached);
+) -> Result<(crate::models::Manga, Vec<Chapter>, bool)> {
+    if let Some((manga, chapters)) = state.cache.get_remote_manga(id) {
+        return Ok((manga, chapters, true));
     }
 
     let url = format!("{}/manga/{}", *crate::config::BASE_URL, id);
@@ -200,7 +200,7 @@ fn fetch_or_cache_remote_manga(
     state
         .cache
         .put_remote_manga(id.to_string(), manga.clone(), chapters.clone());
-    Ok((manga, chapters))
+    Ok((manga, chapters, false))
 }
 
 /// Cache manga directory mapping if not already present, and return `(folder_name, manga_dir)`.
@@ -220,27 +220,29 @@ fn manga_details(id: &str, state: &AppState) -> Result<Response<Cursor<Vec<u8>>>
         return Ok(bad_request("Invalid manga ID"));
     }
 
-    let (manga, chapters) = match fetch_or_cache_remote_manga(id, state) {
+    let (manga, chapters, is_cached) = match fetch_or_cache_remote_manga(id, state) {
         Ok(res) => res,
         Err(e) if is_not_found_error(&e) => return Ok(not_found("Manga not found")),
         Err(e) => return Err(e),
     };
     let _ = cache_manga_dir(id, &manga.title, state);
 
-    let conn = lock_mutex(&state.db);
-    if manga_exists(&conn, id).unwrap_or(false) {
-        if let Err(e) = upsert_manga(
-            &conn,
-            id,
-            &manga.title,
-            &manga.status,
-            chapters.len(),
-            None,
-            CheckTrigger::UserRequest {
-                new_chapters: false,
-            },
-        ) {
-            warn!("Failed to upsert manga {} in database: {}", id, e);
+    if !is_cached {
+        let conn = lock_mutex(&state.db);
+        if manga_exists(&conn, id).unwrap_or(false) {
+            if let Err(e) = upsert_manga(
+                &conn,
+                id,
+                &manga.title,
+                &manga.status,
+                chapters.len(),
+                None,
+                CheckTrigger::UserRequest {
+                    new_chapters: false,
+                },
+            ) {
+                warn!("Failed to upsert manga {} in database: {}", id, e);
+            }
         }
     }
 
@@ -263,7 +265,7 @@ fn manga_chapters_route(
         return Ok(bad_request("Invalid filter parameter"));
     }
 
-    let (manga, mut chapters) = match fetch_or_cache_remote_manga(id, state) {
+    let (manga, mut chapters, is_cached) = match fetch_or_cache_remote_manga(id, state) {
         Ok(res) => res,
         Err(e) if is_not_found_error(&e) => return Ok(not_found("Manga not found")),
         Err(e) => return Err(e),
@@ -273,19 +275,22 @@ fn manga_chapters_route(
     let (_width, existing_count) = scan_manga_chapters(&manga_dir, &manga.title, &mut chapters);
     let has_new = existing_count < chapters.len();
 
-    let conn = lock_mutex(&state.db);
-    if existing_count > 0 || manga_exists(&conn, id).unwrap_or(false) {
-        let _ = upsert_manga(
-            &conn,
-            id,
-            &manga.title,
-            &manga.status,
-            chapters.len(),
-            Some(existing_count),
-            CheckTrigger::UserRequest {
-                new_chapters: has_new,
-            },
-        );
+    if !is_cached || existing_count > 0 {
+        let conn = lock_mutex(&state.db);
+        let in_db = manga_exists(&conn, id).unwrap_or(false);
+        if (!is_cached && in_db) || (!in_db && existing_count > 0) {
+            let _ = upsert_manga(
+                &conn,
+                id,
+                &manga.title,
+                &manga.status,
+                chapters.len(),
+                Some(existing_count),
+                CheckTrigger::UserRequest {
+                    new_chapters: has_new,
+                },
+            );
+        }
     }
 
     match filter_mode {
@@ -332,7 +337,7 @@ fn trigger_download(
         );
     }
 
-    let (manga, mut chapters) = match fetch_or_cache_remote_manga(id, state) {
+    let (manga, mut chapters, _) = match fetch_or_cache_remote_manga(id, state) {
         Ok(res) => res,
         Err(e) if is_not_found_error(&e) => return Ok(not_found("Manga not found")),
         Err(e) => return Err(e),
@@ -656,7 +661,7 @@ fn resolve_manga(id: &str, state: &AppState) -> Result<Option<(String, PathBuf)>
     let title = if let Some(title) = maybe_title {
         title
     } else {
-        let (manga, _chapters) = match fetch_or_cache_remote_manga(id, state) {
+        let (manga, _chapters, _) = match fetch_or_cache_remote_manga(id, state) {
             Ok(res) => res,
             Err(e) if is_not_found_error(&e) => return Ok(None),
             Err(e) => return Err(e),
